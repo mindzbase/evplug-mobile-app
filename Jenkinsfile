@@ -63,7 +63,7 @@ pipeline {
                             echo "No Container of evplug-mobile-app is running. Starting new evplug-mobile-app container now"
                             echo ""
                             echo ""
-                            docker run -d --name ${DOCKER_CONTAINER_NAME} -p 14080:80 -p 14876:8765 -p 14880:8080 -v /home/mindzbase/evplug_config/mobile/mobile_env:/app/.env -v /home/mindzbase/evplug_config/mobile/evplug-prod.json:/app/evplug-prod.json -v /home/mindzbase/evplug_config/mobile/wheelsdrive-config.json:/app/wheelsdrive-config.json --restart always dcr.mindzbase.tech/${DOCKER_IMAGE}:1.0.${BUILD_NUMBER}
+                            docker run -d --name ${DOCKER_CONTAINER_NAME} -p 14080:80 -p 14876:8765 -p 14880:8080 -v /home/mindzbase/evplug_config/mobile/mobile_env:/.env -v /home/mindzbase/evplug_config/mobile/evplug-prod.json:/evplug-prod.json -v /home/mindzbase/evplug_config/mobile/wheelsdrive-config.json:/wheelsdrive-config.json --restart always dcr.mindzbase.tech/${DOCKER_IMAGE}:1.0.${BUILD_NUMBER}
                             
                         else
                             echo "Evplug Mobile Server Container exists. Updating it with new version of the Docker Image."
@@ -80,7 +80,7 @@ pipeline {
                             echo ""
                             echo "=================================="
                             echo ""
-                            docker run -d --name ${DOCKER_CONTAINER_NAME} -p 14080:80 -p 14876:8765 -p 14880:8080 -v /home/mindzbase/evplug_config/mobile/mobile_env:/app/.env -v /home/mindzbase/evplug_config/mobile/evplug-prod.json:/app/evplug-prod.json -v /home/mindzbase/evplug_config/mobile/wheelsdrive-config.json:/app/wheelsdrive-config.json --restart always dcr.mindzbase.tech/${DOCKER_IMAGE}:1.0.${BUILD_NUMBER}
+                            docker run -d --name ${DOCKER_CONTAINER_NAME} -p 14080:80 -p 14876:8765 -p 14880:8080 -v /home/mindzbase/evplug_config/mobile/mobile_env:/.env -v /home/mindzbase/evplug_config/mobile/evplug-prod.json:/evplug-prod.json -v /home/mindzbase/evplug_config/mobile/wheelsdrive-config.json:/wheelsdrive-config.json --restart always dcr.mindzbase.tech/${DOCKER_IMAGE}:1.0.${BUILD_NUMBER}
                          fi'''   
 
                     // Additional steps can be added here, such as verification or testing
