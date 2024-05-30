@@ -29,7 +29,8 @@ async def get_all_vehicles(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -37,8 +38,10 @@ async def get_all_vehicles(request: web.Request) -> web.Response:
 @vehicle_routes.get("/vehicles/get_vehiclesv2")
 async def get_all_vehicles_v2(request: web.Request) -> web.Response:
     try:
-        tenant_id = request.headers["tenant_id"]
-        business_mobile_app = await does_business_have_mobile_app(tenant_id)
+        tenant_id = request.headers.get('tenant_id')
+        enterprise_mobile_app = request.headers.get(
+            "enterprise_mobile_app", False)
+        business_mobile_app = False if enterprise_mobile_app else True
         vehicles = await user_dao.get_all_vehiclesv2(business_mobile_app, tenant_id)
 
         return web.Response(
@@ -50,7 +53,8 @@ async def get_all_vehicles_v2(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -63,7 +67,8 @@ async def set_default_vehicle(request: web.Request) -> web.Response:
         user_id = data.get("user_id")
         tenant_id = request.headers["tenant_id"]
         business_mobile_app = await does_business_have_mobile_app(tenant_id)
-        validate_parameters(vehicle_id, user_id, tenant_id, business_mobile_app)
+        validate_parameters(vehicle_id, user_id,
+                            tenant_id, business_mobile_app)
         res = await verify_user(user_id=user_id)
         if not res:
             return web.Response(
@@ -105,6 +110,7 @@ async def set_default_vehicle(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )

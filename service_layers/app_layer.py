@@ -28,7 +28,7 @@ async def get_tenant_ids_based_on_mobile_app(tenant_id, business_mobile_app):
         tenant_ids = await get_children_of_enterprise()
     elif business_mobile_app:
         tenant_ids = [tenant_id]
-    return "', '".join(tenant_ids) if tenant_ids else ""
+    return tenant_ids
 
 
 async def get_charging_stations(
@@ -54,7 +54,8 @@ async def get_charging_stations(
 
     org_max_amounts = await get_holding_amount_of_organisation(org_ids=org_ids)
     for charging_station in charging_stations.values():
-        charging_station["connectors"].sort(key=lambda x: sort_order.index(x["status"]))
+        charging_station["connectors"].sort(
+            key=lambda x: sort_order.index(x["status"]))
         loc_org_id = charging_station.pop("org_id")
         price = charging_station.pop("price")
         bill_by = charging_station.pop("bill_by")
@@ -102,7 +103,8 @@ async def get_holding_amount_of_organisation(org_ids):
 
 
 async def get_location_info(charging_stations, day, user_id):
-    location_ids = [charger["location_id"] for charger in charging_stations.values()]
+    location_ids = [charger["location_id"]
+                    for charger in charging_stations.values()]
     locations = await get_all_charging_locations(location_ids, day)
     third_party_location = await get_all_third_party_charging_locations(
         locations_ids=location_ids, day=day,
@@ -119,7 +121,8 @@ async def get_location_info(charging_stations, day, user_id):
 
     await update_favorite_station(locations, user_id, day)
     await update_recent_charging_station(locations, user_id, day)
-    update_locations(locations, charging_stations, amenities, images, sort_order)
+    update_locations(locations, charging_stations,
+                     amenities, images, sort_order)
     return locations
 
 
@@ -162,7 +165,8 @@ def update_user_plans(charging_stations, user_plans):
         if charging_stations.get(charger_id):
             for connector in charging_stations[charger_id]["connectors"]:
                 if connector.get("connector_id") == int(plan.get("connector_id")):
-                    connector["price"] = plan.get("price", connector.get("price"))
+                    connector["price"] = plan.get(
+                        "price", connector.get("price"))
                     connector["bill_by"] = plan.get(
                         "billing_type", connector.get("bill_by"),
                     )

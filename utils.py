@@ -1,4 +1,7 @@
 from datetime import datetime
+import hashlib
+import hmac
+import json
 import math
 import passlib.hash
 import stripe
@@ -8,7 +11,6 @@ from errors.mysql_error import MissingInfoException
 import ocpp_server
 from dao import user_dao
 import logging
-from websocket import send_message_to_client
 from mail import send_plain_invoice_email
 
 
@@ -120,68 +122,6 @@ async def stop_charging(
             res.update({"data": data})
             return res
     return res
-
-
-# async def idle_charging_info(
-#     session_id, session_start_time, change_status_time, user_id
-# ):
-#     try:
-#         price_plan_info = await user_dao.get_price_plan_by_session_parameter(
-#             session_id=session_id
-#         )
-#         if not price_plan_info:
-#             raise MissingInfoException(
-#                 message=f"""
-#                     Either Price Plan or Session Parameter not found for session id: {
-#                         session_id
-#                     }
-#                 """
-#             )
-#         apply_after_minutes = price_plan_info.get("apply_after")
-#         idle_charging_fee = price_plan_info.get("idle_charging_fee", 0)
-#         if isinstance(change_status_time, str):
-#             change_status_time = datetime.strptime(
-#                 change_status_time, "%Y-%m-%dT%H:%M:%S"
-#             )
-#         if isinstance(session_start_time, str):
-#             session_start_time = datetime.strptime(
-#                 session_start_time, "%Y-%m-%dT%H:%M:%S"
-#             )
-#         interval_of_status_change = change_status_time - session_start_time
-#         interval_of_status_change_in_seconds = interval_of_status_change.total_seconds()
-#         interval_of_status_change_in_minutes = math.ceil(
-#             interval_of_status_change_in_seconds / 60
-#         )
-
-#         cost_of_idle_vehicle = 0
-#         if interval_of_status_change_in_minutes > apply_after_minutes:
-#             cost_of_idle_vehicle = (
-#                 interval_of_status_change_in_minutes * idle_charging_fee
-#             )
-
-#             res = await user_dao.get_wallet_balance(user_id=user_id)
-#             wallet_balance = res.get("wallet_balance") if res else None
-#             if wallet_balance is None:
-#                 raise MissingInfoException(
-#                     f"Unable to fetch wallet balance for user_id: {user_id}"
-#                 )
-#             wallet_balance = wallet_balance - cost_of_idle_vehicle
-#             await user_dao.update_wallet_balance(
-#                 new_balance=wallet_balance, user_id=user_id
-#             )
-#         else:
-#             LOGGER.info(
-#                 f"""
-#                 Skipped Idle charging processing because
-#                 interval time {interval_of_status_change_in_minutes} is <= than
-#                 free idle charging time which is {apply_after_minutes}
-#             """
-#             )
-#         return
-#     except MissingInfoException as e:
-#         LOGGER.error(e)
-#     except Exception as e:
-#         LOGGER.error(e)
 
 
 async def idle_charging_info_and_send_invoice(
@@ -435,7 +375,85 @@ def get_currency_symbol(curr):
         "dollar": "$",
         "rupee": "₹",
         "pound": "£",
-        "dirham": "د.إ",
+        "dirham": "AED",
         "moroccan dirham": "MAD"
     }
     return currency.get(curr, "$")
+
+
+def get_value_without_tax(with_tax, tax_percent):
+    multiplier = 1 + (tax_percent / 100.0)
+    without_tax = with_tax / multiplier
+    return without_tax
+
+
+def calculate_cost(
+    bill_by="", tax_percent=0, price=0,
+    minutes=0, energy_units_kWh=0,
+    fixed_starting_fee=0,
+    apply_after=0, idle_fee=0,
+    vehicle_idle_minutes=0,
+    gateway_fee=0, extra_time=0,
+    total_cost_without_tax=0
+):
+    charging_cost = 0
+    charging_cost_with_tax = 0
+    idle_cost = 0
+    tax_amount = 0
+    final_cost = 0
+
+    if price:
+        if bill_by == "per_minute" or bill_by == "duration_in_minutes":
+            charging_cost = round(price * minutes, 2)
+        elif bill_by == "per_kWh" or bill_by == "max_energy_consumption":
+            charging_cost = round(price * energy_units_kWh, 2)
+
+        total_cost_without_tax += charging_cost
+
+        if charging_cost and tax_percent:
+            charging_cost_with_tax = round(
+                charging_cost + (charging_cost * tax_percent * 0.01), 2
+            )
+
+    if fixed_starting_fee:
+        total_cost_without_tax += round(fixed_starting_fee, 2)
+
+    if gateway_fee:
+        total_cost_without_tax += round(gateway_fee, 2)
+
+    if apply_after and idle_fee and vehicle_idle_minutes:
+        extra_time = vehicle_idle_minutes - apply_after
+
+        if extra_time > 0:
+            idle_cost = round(idle_fee * extra_time, 2)
+        else:
+            extra_time = 0
+
+        total_cost_without_tax += idle_cost
+
+    if tax_percent:
+        tax_amount = round(total_cost_without_tax * tax_percent * 0.01, 2)
+
+    final_cost = round(total_cost_without_tax + tax_amount, 2)
+
+    return {
+        "charging_cost": charging_cost,
+        "charging_cost_with_tax": charging_cost_with_tax,
+        "idle_cost": idle_cost,
+        "total_cost_without_tax": total_cost_without_tax,
+        "tax_amount": tax_amount,
+        "final_cost": final_cost,
+        "extra_time": extra_time,
+    }
+
+
+def generate_signature(secret_key, payload):
+    # Convert the payload to JSON format
+    json_payload = json.dumps(payload, separators=(
+        ',', ':'), sort_keys=True).encode('utf-8')
+
+    # Calculate the HMAC-SHA256 signature
+    signature = hmac.new(secret_key.encode('utf-8'),
+                         json_payload, hashlib.sha256).hexdigest()
+
+    return signature

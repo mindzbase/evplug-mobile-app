@@ -44,7 +44,7 @@ async def create_new_user(
             VALUES (
                 '{name}',
                 '{email}',
-                '{datetime.datetime.utcnow()}',
+                null,
                 'password',
                 '{phone}',
                 '{0}',

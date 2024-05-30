@@ -9,7 +9,7 @@ import utils
 from dao import helperdao
 from enums.repeat_interval import RepeatInterval
 from enums.span import Span
-from errors.mysql_error import MySQLError
+from errors.mysql_error import MissingObjectOnDB, MySQLError
 
 LOGGER = logging.getLogger("server")
 
@@ -32,14 +32,23 @@ async def validate_token(user_id: str, business_mobile_app: bool, tenant_id: str
         raise MySQLError(str(e))
 
 
-async def get_user_from_id_tag(id_tag: str, tenant_id: str):
+async def get_user_from_id_tag(id_tag: str, tenant_id: str, business_mobile_app: bool):
     try:
-        query = f"""
+        query_for_enterprise = f"""
+            SELECT user_id from rfid_cards WHERE rfid_number = '{id_tag}'
+        """
+
+        query_for_tenant = f"""
             SELECT user_id from `tenant{tenant_id}`.`rfid_cards`
             WHERE rfid_number = '{id_tag}'
         """
-        LOGGER.info(query)
-        res = await helperdao.fetchone_dict(query)
+
+        if not business_mobile_app:
+            res = await helperdao.fetchone_dict(query_for_enterprise)
+            if res:
+                return res.get("user_id")
+
+        res = await helperdao.fetchone_dict(query_for_tenant)
         return res.get("user_id") if res else {}
     except Exception as e:
         raise MySQLError(str(e))
@@ -77,6 +86,8 @@ async def get_user_details_with_user_id(
     table = (
         f"""
             `tenant{tenant_id}`.`customer_invites` u
+        LEFT JOIN `tenant{tenant_id}`.`users` ud ON
+            u.user_id=ud.id
         LEFT JOIN `tenant{tenant_id}`.`user_vehicles` uv ON
             u.user_id = uv.user_id
         LEFT JOIN `tenant{tenant_id}`.`vehicles` v ON
@@ -84,6 +95,8 @@ async def get_user_details_with_user_id(
         if business_mobile_app
         else """
             `customer_invites` u
+        LEFT JOIN `users` ud ON
+            u.user_id=ud.id
         LEFT JOIN `user_vehicles` uv ON
             u.user_id = uv.user_id
         LEFT JOIN `vehicles` v ON
@@ -103,7 +116,11 @@ async def get_user_details_with_user_id(
             u.address,
             uv.id,
             uv.is_default,
-            v.image_url
+            v.image_url,
+            CASE
+                WHEN ud.email_verified_at IS NOT NULL THEN 1
+                WHEN ud.email_verified_at IS NULL THEN 0
+            END AS is_email_verified
         FROM
             {table}
             uv.vehicle_id = v.id
@@ -142,6 +159,7 @@ async def get_user_details_with_user_id(
     user_id = ""
     name = ""
     email = ""
+    is_email_verified = False
     phone = ""
     wallet_balance = ""
     address = ""
@@ -173,6 +191,7 @@ async def get_user_details_with_user_id(
             phone = row.get("phone")
             wallet_balance = float(row.get("wallet_balance"))
             address = row.get("address")
+            is_email_verified = bool(row.get("is_email_verified", 0))
         for val in location_sets:
             favorite_charging_stations.append(val)
 
@@ -182,6 +201,7 @@ async def get_user_details_with_user_id(
             "user_id": user_id,
             "name": name,
             "email": email,
+            "is_email_verified": is_email_verified,
             "phone": phone,
             "wallet_balance": wallet_balance,
             "address": address,
@@ -274,8 +294,7 @@ async def get_session_paramters(session_id, tenant_id):
             cs.fixed_starting_fee,
             cs.duration_in_minutes AS end_time,
             cs.max_energy_consumption AS total_energy,
-            s.start_id_tag,
-            rc.user_id
+            s.start_id_tag
         FROM
             `tenant{tenant_id}`.`sessions` s
         INNER JOIN
@@ -290,10 +309,6 @@ async def get_session_paramters(session_id, tenant_id):
             `tenant{tenant_id}`.`locations` l
         ON
             c.location_id = l.id
-        INNER JOIN
-            `tenant{tenant_id}`.`rfid_cards` rc
-        ON
-            rc.rfid_number = s.start_id_tag
         WHERE
             s.id = {session_id}
     """
@@ -907,16 +922,28 @@ async def get_charging_session_history(user_id: uuid):
 
 
 # TODO discuss with both enterprise and buessiness can both have apps
-async def get_users_id_tag(user_id: str, tenant_id: str) -> Any:
+async def get_users_id_tag(user_id: str, tenant_id: str, business_mobile_app: bool) -> Any:
     try:
-        query = f"""
+        query_for_enterprise = f"""
             SELECT
                 rfid_number
             FROM
-                `tenant{tenant_id}`.`rfid_cards`
+                rfid_cards
             WHERE user_id = '{user_id}'
         """
-        res = await helperdao.fetchone(query)
+        query_for_tenant = f"""
+            SELECT
+                rfid_number
+            FROM
+                `tenant{tenant_id}`.rfid_cards
+            WHERE user_id = '{user_id}'
+        """
+        if not business_mobile_app:
+            res = await helperdao.fetchone(query_for_enterprise)
+            if res is not None:
+                return res[0]
+
+        res = await helperdao.fetchone(query_for_tenant)
         if res is not None:
             return res[0]
         return None
@@ -1396,7 +1423,7 @@ async def get_vehicle_details(vehicle_id, tenant_id, business_mobile_app):
         table = (
             f"`tenant{tenant_id}`.`vehicles`"
             if business_mobile_app
-            else "``vehicles"
+            else "`vehicles`"
         )
         query = f"""
             SELECT * from {table} WHERE id='{vehicle_id}'
@@ -1514,6 +1541,7 @@ async def get_running_session_details_v2(session_ids, tenant_id, business_mobile
                         },
                         "duration": session["duration"],
                         "connectorType": session["connector_type"],
+                        "tenantId": tenant_id
                     }
                 )
             return session_detail_list
@@ -1547,10 +1575,8 @@ async def get_current_running_session_id_with_id_tag(id_tag, tenant_id):
 async def get_current_running_sessions_in_organisations(tenant_id):
     try:
         query = f"""
-            SELECT s.id, rc.user_id from `tenant{tenant_id}`.`sessions` s
-            INNER JOIN `tenant{tenant_id}`.`rfid_cards` rc ON
-            rc.rfid_number = s.start_id_tag WHERE s.is_running = 1
-            ORDER BY s.created_at DESC;
+            SELECT s.id, s.start_id_tag from `tenant{tenant_id}`.`sessions` s
+            WHERE s.is_running = 1 ORDER BY s.created_at DESC;
         """
         res = await helperdao.fetchall_dict(query)
         current_sessions_list = []
@@ -1559,7 +1585,8 @@ async def get_current_running_sessions_in_organisations(tenant_id):
                 current_sessions_list.append(
                     {
                         "id": r["id"],
-                        "user_id": r["user_id"],
+                        "id_tag": r["start_id_tag"],
+                        "tenant_id": tenant_id
                     }
                 )
         return current_sessions_list
@@ -1688,14 +1715,23 @@ async def update_userv2(
             if business_mobile_app
             else "`customer_invites`"
         )
+        user_table = (
+            f"`tenant{tenant_id}`.`users`"
+            if business_mobile_app
+            else "`users`"
+        )
         query = ""
         query1 = f"""
             UPDATE {table} SET `name`='{name}'
             WHERE `user_id`='{user_id}';
+            UPDATE {user_table} SET `name`='{name}'
+            WHERE `id`='{user_id}';
         """
 
         query2 = f"""
             UPDATE {table} SET `email`='{email}' WHERE `user_id`='{user_id}';
+            UPDATE {user_table} SET `email`='{email}', `email_verified_at`=null
+            WHERE `id`='{user_id}';
         """
 
         query3 = f"""
@@ -2060,12 +2096,9 @@ async def get_additional_details_from_session_parameters(session_id, tenant_id):
             `max_energy_consumption`,
             `duration_in_minutes`,
             `stop_charging_by`,
-            `rc`.`user_id`
+            `user_id`
         FROM
-            `tenant{tenant_id}`.`session_parameters` sp
-        INNER JOIN `tenant{tenant_id}`.`rfid_cards` rc
-        ON
-            sp.id_tag=rc.rfid_number
+            `tenant{tenant_id}`.`session_parameters`
         WHERE
             `session_id`='{session_id}';
         """
@@ -2488,7 +2521,6 @@ async def get_invoice_by_session_id(session_id, tenant_id):
                 "idle_charging_cost") else 0
         )
         idle_charging_cost = round(idle_charging_cost, 2)
-        gateway_fee = res.get("gateway_fee")
         return {
             "invoice": {
                 "invoice_id": res.get("id"),
@@ -2507,16 +2539,20 @@ async def get_invoice_by_session_id(session_id, tenant_id):
                     "total_energy_used": f"{res.get('session_energy_used'):.2f}",
                 },
                 "bill_by": res.get("bill_by"),
+                "tax_percent": res.get("tax_percentage"),
                 "price": res.get("price"),
                 "currency": res.get("currency"),
                 "charging_cost": round(res.get("charging_cost"), 2),
-                "tax_percent": res.get("tax_percentage"),
-                "gateway_fee": gateway_fee,
+                "service_fee": round(
+                    res.get("gateway_fee", 0)
+                    + res.get("fixed_starting_fee"), 2
+                ),
+                "idle_charging_cost": res.get("idle_charging_cost", 0),
+                "total_tax": res.get("total_tax"),
+                "final_cost": res.get("final_amount"),
                 "charging_cost_with_tax": charging_cost_with_tax,
                 "idle_price": res.get("idle_price"),
                 "idle_minutes": res.get("idle_minutes"),
-                "idle_charging_cost": idle_charging_cost,
-                "final_cost": charging_cost_with_tax + idle_charging_cost + gateway_fee,
                 "user_id": res.get("user_id"),
                 "vehicle_id": res.get("vehicle_id"),
             },
@@ -2545,17 +2581,20 @@ async def get_users_sessions(user_id, tenant_id, business_mobile_app):
             `inv`.`session_runtime`,
             `inv`.`session_energy_used`,
             `inv`.`bill_by`,
+            `inv`.`tax_percentage`,
             `inv`.`price`,
             `inv`.`currency`,
             `inv`.`charging_cost`,
-            `inv`.`tax_percentage`,
+            `inv`.`gateway_fee`,
+            `inv`.`fixed_starting_fee`,
+            `inv`.`idle_charging_cost`,
+            `inv`.`total_tax`,
+            `inv`.`final_amount`,
             `inv`.`charging_cost_with_tax`,
             `inv`.`user_id`,
             `inv`.`vehicle_id`,
             `inv`.`idle_minutes`,
             `inv`.`idle_price`,
-            `inv`.`idle_charging_cost`,
-            `inv`.`gateway_fee`,
             `s`.`start_time`,
             `v`.`model`,
             `v`.`manufacturer`,
@@ -2576,36 +2615,26 @@ async def get_users_sessions(user_id, tenant_id, business_mobile_app):
     res = await helperdao.fetchall_dict(query)
     sessions = {}
     sessionsList = []
+
     if res:
         for session in res:
             start_time: datetime = session.get("start_time")
             key = start_time.date()
             session["start_date"] = str(key)
-            session["start_time"] = str(session["start_time"])
-            charging_cost_with_tax = (
-                session.get("charging_cost_with_tax")
-                if session.get("charging_cost_with_tax")
-                else 0
+            session["service_fee"] = round(
+                session.get("gateway_fee", 0)
+                + session.get("fixed_starting_fee", 0), 2
             )
-            gateway_fee = (
-                session.get("gateway_fee")
-                if session.get("gateway_fee")
-                else 0
-            )
-            idle_charging_cost = (
-                session.get("idle_charging_cost")
-                if session.get("idle_charging_cost")
-                else 0
-            )
-            session["final_cost"] = (
-                charging_cost_with_tax + idle_charging_cost + gateway_fee
-            )
+            session["final_cost"] = session.get("final_amount", 0)
+
             if key in sessions.keys():
                 sessions[key].append(session)
             else:
                 sessions[key] = [session]
+
         for session in sessions:
             sessionsList.append(sessions[session])
+
     return sessionsList
 
 
@@ -2627,22 +2656,6 @@ async def insert_stripe_payment_info(payment_id, user_id, amount, tenant_id):
 
 
 async def get_wallet_history(user_id, tenant_id, business_mobile_app):
-    def get_datetime(item):
-        if "created_at" in item:
-            return item["created_at"]
-        elif "start_time" in item:
-            return item["start_time"]
-        else:
-            return None
-
-    def get_date(item):
-        if "created_at" in item:
-            return item["created_at"].date()
-        elif "start_time" in item:
-            return item["start_time"].date()
-        else:
-            return None
-
     table = (
         f"`tenant{tenant_id}`.`vehicles`"
         if business_mobile_app
@@ -2672,6 +2685,7 @@ async def get_wallet_history(user_id, tenant_id, business_mobile_app):
             `inv`.`vehicle_id`,
             `inv`.`idle_minutes`,
             `inv`.`idle_price`,
+            `inv`.`fixed_starting_fee`,
             `inv`.`idle_charging_cost`,
             `inv`.`gateway_fee`,
             `s`.`start_time`,
@@ -2710,17 +2724,31 @@ async def get_wallet_history(user_id, tenant_id, business_mobile_app):
                 if session.get("idle_charging_cost")
                 else 0
             )
-            session["final_cost"] = (
-                charging_cost_with_tax + idle_charging_cost + gateway_fee
+            fixed_starting_fee = (
+                session.get("fixed_starting_fee")
+                if session.get("fixed_starting_fee")
+                else 0
             )
+            session["final_cost"] = (
+                charging_cost_with_tax
+                + idle_charging_cost
+                + gateway_fee
+                + fixed_starting_fee
+            )
+    table_history = (
+        f"`tenant{tenant_id}`.`payment_transactions`"
+        if business_mobile_app
+        else "`payment_transactions`"
+    )
+
     query = f"""
     SELECT
-        `payment_id`,
-        `amount_added`,
+        `merchantPaymentId`,
+        `amount`,
         `user_id`,
         `created_at`
     FROM
-        `tenant{tenant_id}`.`stripe_payments`
+        {table_history}
     WHERE
         `user_id`='{user_id}'
     ORDER BY
@@ -2737,27 +2765,10 @@ async def get_wallet_history(user_id, tenant_id, business_mobile_app):
         combined_result = stripe_info_result
     elif sessions_result:
         combined_result = sessions_result
-    sorted_result = sorted(
-        combined_result, key=lambda x: get_datetime(x), reverse=True)
-    history = {}
-    historyList = []
-
-    for item in sorted_result:
-        date = get_date(item)
-        if date not in history:
-            history[date] = []
-        history[date].append(item)
-        if "created_at" in item:
-            item["created_at"] = str(item["created_at"])
-        if "start_time" in item:
-            item["start_time"] = str(item["start_time"])
-    for i in history:
-        historyList.append(history[i])
-
-    return historyList
+    return combined_result
 
 
-async def get_phonepe_wallet_history(user_id, tenant_id, business_mobile_app):
+async def sort_history_and_arrange_by_date(combined_result, arrange_by_date=True):
     def get_datetime(item):
         if "created_at" in item:
             return item["created_at"]
@@ -2773,6 +2784,30 @@ async def get_phonepe_wallet_history(user_id, tenant_id, business_mobile_app):
             return item["start_time"].date()
         else:
             return None
+    sorted_result = sorted(
+        combined_result, key=lambda x: get_datetime(x), reverse=True)
+
+    if not arrange_by_date:
+        return sorted_result
+
+    history = {}
+    historyList = []
+
+    for item in sorted_result:
+        date = get_date(item)
+        if date not in history:
+            history[date] = []
+        history[date].append(item)
+        if "created_at" in item:
+            item["created_at"] = str(item["created_at"])
+        if "start_time" in item:
+            item["start_time"] = str(item["start_time"])
+    for i in history:
+        historyList.append(history[i])
+    return historyList
+
+
+async def get_phonepe_wallet_history(user_id, tenant_id, business_mobile_app):
     table = (
         f"`tenant{tenant_id}`.`vehicles`"
         if business_mobile_app
@@ -2843,42 +2878,11 @@ async def get_phonepe_wallet_history(user_id, tenant_id, business_mobile_app):
         combined_result = stripe_info_result
     elif sessions_result:
         combined_result = sessions_result
-    sorted_result = sorted(
-        combined_result, key=lambda x: get_datetime(x), reverse=True)
-    history = {}
-    historyList = []
 
-    for item in sorted_result:
-        date = get_date(item)
-        if date not in history:
-            history[date] = []
-        history[date].append(item)
-        if "created_at" in item:
-            item["created_at"] = str(item["created_at"])
-        if "start_time" in item:
-            item["start_time"] = str(item["start_time"])
-    for i in history:
-        historyList.append(history[i])
-
-    return historyList
+    return combined_result
 
 
 async def get_maib_wallet_history(user_id, tenant_id, business_mobile_app):
-    def get_datetime(item):
-        if "created_at" in item:
-            return item["created_at"]
-        elif "start_time" in item:
-            return item["start_time"]
-        else:
-            return None
-
-    def get_date(item):
-        if "created_at" in item:
-            return item["created_at"].date()
-        elif "start_time" in item:
-            return item["start_time"].date()
-        else:
-            return None
     table = (
         f"`tenant{tenant_id}`.`vehicles`"
         if business_mobile_app
@@ -2947,24 +2951,8 @@ async def get_maib_wallet_history(user_id, tenant_id, business_mobile_app):
         combined_result = stripe_info_result
     elif sessions_result:
         combined_result = sessions_result
-    sorted_result = sorted(
-        combined_result, key=lambda x: get_datetime(x), reverse=True)
-    history = {}
-    historyList = []
 
-    for item in sorted_result:
-        date = get_date(item)
-        if date not in history:
-            history[date] = []
-        history[date].append(item)
-        if "created_at" in item:
-            item["created_at"] = str(item["created_at"])
-        if "start_time" in item:
-            item["start_time"] = str(item["start_time"])
-    for i in history:
-        historyList.append(history[i])
-
-    return historyList
+    return combined_result
 
 
 async def get_user_details(user_id, tenant_id, business_mobile_app):
@@ -2993,6 +2981,9 @@ async def get_charger_detail(charger_id, connector_id, tenant_id):
                 c.model,
                 pp.price,
                 pp.billing_type,
+                pp.fixed_starting_fee,
+                pp.idle_charging_fee,
+                pp.apply_after,
                 co.charger_id,
                 co.connector_id,
                 co.max_output,
@@ -3020,6 +3011,9 @@ async def get_charger_detail(charger_id, connector_id, tenant_id):
             "max_output": chargers_dict.pop("max_output"),
             "bill_by": chargers_dict.pop("billing_type"),
             "price": float(chargers_dict.pop("price")),
+            "apply_after": chargers_dict.pop("apply_after"),
+            "fixed_starting_fee": float(chargers_dict.pop("fixed_starting_fee")),
+            "idle_charging_fee": float(chargers_dict.pop("idle_charging_fee"))
         }
         return chargers_dict
     except Exception as e:
@@ -3110,7 +3104,8 @@ async def get_user_price_for_charger(user_id, charger_id, connector_id, tenant_i
         WHERE
             `civ`.`user_id` = '{user_id}'
         AND `up`.`charger_id` = '{charger_id}'
-        AND `co`.`connector_id` = '{connector_id}';
+        AND `co`.`connector_id` = '{connector_id}'
+        AND `up`.`deleted_at` is NULL;
     """
     res = await helperdao.fetchone_dict(query)
     return res if res else {}
@@ -3556,8 +3551,22 @@ async def is_session_running_v2(session_id: str, tenant_id: str):
     return False, None, None
 
 
+async def enterprise_id_tags(user_id):
+    query_for_enterprise = f"""
+    SELECT
+        rfid_number as id_tag
+    FROM
+        `rfid_cards`
+    WHERE
+        user_id='{user_id}'
+    """
+    res = await helperdao.fetchall_dict(query=query_for_enterprise)
+    return [x.get("id_tag") for x in res] if res else []
+
+
 async def get_id_tags_by_user_id(user_id, tenant_id):
-    query = f"""
+    id_tags = {tenant_id: []}
+    query_for_tenant = f"""
     SELECT
         rfid_number as id_tag
     FROM
@@ -3565,8 +3574,13 @@ async def get_id_tags_by_user_id(user_id, tenant_id):
     WHERE
         user_id='{user_id}'
     """
-    res = await helperdao.fetchall_dict(query=query)
-    return [x.get("id_tag") for x in res] if res else []
+
+    cards = await helperdao.fetchall_dict(query=query_for_tenant)
+
+    for card in cards:
+        id_tags[tenant_id].append(card.get('id_tag'))
+
+    return id_tags
 
 
 async def get_all_running_session_by_id_tags(id_tags, tenant_id):
@@ -3715,7 +3729,7 @@ async def get_ongoing_idle_sessions(user_id, tenant_id):
         if combination not in unique_combinations:
             unique_combinations.add(combination)
             session_ids.append(session_id)
-    return session_ids
+    return {tenant_id: session_ids}
 
 
 async def get_location_charger_details(charger_id, connector_id, tenant_id):
@@ -3787,11 +3801,9 @@ async def get_holding_amount(charger_type=None, org_id=None, org_ids=None):
         return res if res else []
 
 
-async def charger_detail(charger_id: str, tenant_id: str, business_mobile_app: bool):
+async def charger_detail(charger_id: str, tenant_id: str):
     table = (
         f"`tenant{tenant_id}`.`chargers`"
-        if business_mobile_app
-        else "`chargers`"
     )
     query = f"""
         SELECT
@@ -3935,3 +3947,111 @@ async def get_plugshare_link(charger_id: str, tenant_id: str):
     """
     res = await helperdao.fetchone_dict(query=query)
     return res.get("link") if res else ""
+
+
+async def get_price_plan_of_user(user_id, charger_id, connector_id, tenant_id):
+    try:
+        plan_id = 0
+        plan_id = await check_user_have_private_plans(
+            user_id=user_id,
+            charger_id=charger_id,
+            connector_id=connector_id,
+            tenant_id=tenant_id,
+        )
+
+        if not plan_id:
+            plan_id = await get_charging_plan_of_connector(
+                charger_id=charger_id,
+                connector_id=connector_id,
+                tenant_id=tenant_id,
+            )
+
+        if not plan_id:
+            plan_id = await get_charging_plan_of_location(
+                charger_id=charger_id,
+                tenant_id=tenant_id,
+            )
+
+        utils.check_object_existence(plan_id, "Price Plan")
+
+        price_detail = await get_pricing_plan(
+            price_id=plan_id,
+            tenant_id=tenant_id,
+        )
+
+        utils.check_object_existence(price_detail, "Price Plan")
+
+        return price_detail
+
+    except MissingObjectOnDB as e:
+        raise e
+
+    except Exception as e:
+        raise e
+
+
+async def insert_payment_transaction(merchantPaymentId, currency, amount, transactionTime, user_id, tenant_id, paymentGateway):
+    if (tenant_id != "enterprise"):
+        query = f"""
+            INSERT into `tenant{tenant_id}`.`payment_transactions`
+            (merchantPaymentId, currency, amount, transactionTime, user_id, paymentGateway)
+            VALUES
+            ('{merchantPaymentId}', '{currency}', '{amount}', '{transactionTime}', '{user_id}', '{paymentGateway}');
+        """
+    else:
+        query = f"""
+            INSERT into `payment_transactions`
+            (merchantPaymentId, currency, amount, transactionTime, user_id, paymentGateway)
+            VALUES
+            ('{merchantPaymentId}', '{currency}', '{amount}', '{transactionTime}', '{user_id}', '{paymentGateway}');
+        """
+    res = await helperdao.fetchone_dict(query)
+    return res if res else {}
+
+
+async def update_payzone_transaction(status, merchantPaymentId,
+                                     paymentGatewayPaymentId,
+                                     paymentType,
+                                     paymentMethod,
+                                     data,
+                                     tenant_id):
+    if (tenant_id != "enterprise"):
+        query = f"""
+            UPDATE `tenant{tenant_id}`.`payment_transactions`
+            SET `status`='{status}', `paymentGatewayPaymentId`='{paymentGatewayPaymentId}',
+            `paymentType`='{paymentType}', `paymentMethod`='{paymentMethod}', `data`='{str(data)}'
+            WHERE `merchantPaymentId`='{merchantPaymentId}'
+        """
+    else:
+        query = f"""
+            UPDATE `payment_transactions`
+            SET `status`='{status}', `paymentGatewayPaymentId`='{paymentGatewayPaymentId}',
+            `paymentType`='{paymentType}', `paymentMethod`='{paymentMethod}', `data`='{str(data)}'
+            WHERE `merchantPaymentId`='{merchantPaymentId}'
+        """
+    res = await helperdao.upsert_delete(query)
+    return res if res else {}
+
+
+async def get_user_id_for_payzone_transaction(merchantPaymentId, tenant_id):
+    if (tenant_id != "enterprise"):
+
+        query = f"""
+            SELECT
+                `user_id`
+            FROM
+                `tenant{tenant_id}`.`payment_transactions`
+            WHERE
+                `merchantPaymentId`= '{merchantPaymentId}'
+        """
+    else:
+        query = f"""
+            SELECT
+                `user_id`
+            FROM
+                `payment_transactions`
+            WHERE
+                `merchantPaymentId`= '{merchantPaymentId}'
+        """
+    res = await helperdao.fetchone_dict(query=query)
+    return res.get("user_id") if res else ""

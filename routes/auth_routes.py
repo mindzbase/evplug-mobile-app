@@ -222,6 +222,7 @@ async def user_verification(request: web.Request) -> web.Response:
                     tenant_id=request['tenant_id'],
                     event_name="email_verification",
                     data={"isEmailVerified": True},
+                    business_mobile_app=request["business_mobile_app"]
                 ),
             )
             organisation = tasks[0]
