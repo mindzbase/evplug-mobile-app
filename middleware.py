@@ -85,10 +85,8 @@ async def tenant_and_user_middleware(request, handler):
         await validate_tenant(tenant_id=tenant_id)
         request['tenant_id'] = tenant_id
         business_mobile_app = await app_dao.does_business_have_mobile_app(tenant_id)
-        logging.info("business_mobile_app" + business_mobile_app)
         request['business_mobile_app'] = business_mobile_app
         compiled_exclude_paths = [re.compile(pattern) for pattern in exclude_paths]
-        logging.info("compiled_exclude_paths" + compiled_exclude_paths)
         if any(pattern.match(request.path) for pattern in compiled_exclude_paths):
             logging.info("reaching in exclude folder using logging")
             return await handler(request)
