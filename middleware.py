@@ -90,11 +90,9 @@ async def tenant_and_user_middleware(request, handler):
         compiled_exclude_paths = [re.compile(pattern) for pattern in exclude_paths]
         logging.info("compiled_exclude_paths" + compiled_exclude_paths)
         if any(pattern.match(request.path) for pattern in compiled_exclude_paths):
-            print("reaching in exclude folder")
             logging.info("reaching in exclude folder using logging")
             return await handler(request)
         else:
-            print("reaching in else condition")
             logging.info("reaching in else folder using logging")
             authorization = request.headers.get('Authorization')
             user_id = authorization.replace('token ', '')
