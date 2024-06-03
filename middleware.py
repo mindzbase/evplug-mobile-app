@@ -66,6 +66,7 @@ async def validate_tenant(tenant_id):
 
 @web.middleware
 async def tenant_and_user_middleware(request, handler):
+    logging.info("reaching in middleware")
     try:
         exclude_paths = [
             r"/auth/\w+",
