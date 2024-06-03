@@ -834,7 +834,9 @@ async def get_tenant_detail(tenant_id):
     query = f"""
         SELECT * FROM `businesses` WHERE `tenant_id`='{tenant_id}'
     """
+    logging.info("get tenant query:",query)
     res = await helperdao.fetchone_dict(query)
+    logging.info("get tenant res:",res)
     return res.get("tenant_id") if res else None
 
 
