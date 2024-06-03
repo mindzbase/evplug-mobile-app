@@ -81,7 +81,7 @@ async def tenant_and_user_middleware(request, handler):
             r"\/webapp\/\w+\/",
         ]
         tenant_id = request.headers.get("tenant_id")
-        logging.info("tenant_id" + tenant_id)
+        logging.info("tenant_id" + request.headers)
         await validate_tenant(tenant_id=tenant_id)
         request['tenant_id'] = tenant_id
         business_mobile_app = await app_dao.does_business_have_mobile_app(tenant_id)
