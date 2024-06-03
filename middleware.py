@@ -3,6 +3,8 @@ import re
 from dao import user_dao
 from dao import app_dao
 from aiohttp import web
+import logging
+LOGGER = logging.getLogger("server")
 
 
 # async def validate_token(user_id: str, tenant_id: str, business_mobile_app: bool):
@@ -86,8 +88,10 @@ async def tenant_and_user_middleware(request, handler):
         request['business_mobile_app'] = business_mobile_app
         compiled_exclude_paths = [re.compile(pattern) for pattern in exclude_paths]
         if any(pattern.match(request.path) for pattern in compiled_exclude_paths):
+            LOGGER.info("Reaching in Exclude Filter")
             return await handler(request)
         else:
+            LOGGER.info("Reaching in Other Filter")
             authorization = request.headers.get('Authorization')
             user_id = authorization.replace('token ', '')
             await validate_token(
