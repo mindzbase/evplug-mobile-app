@@ -80,11 +80,6 @@ async def tenant_and_user_middleware(request, handler):
             r"\/webapp\/\w+\/\w+\/",
             r"\/webapp\/\w+\/",
         ]
-        headers_list = request.headers.to_wsgi_list()
-        for header, value in headers_list:
-            logging.info(f'Header: {header} = {value}')
-
-        # Alternatively, log the entire headers dictionary
         logging.info(f'All Request Headers: {dict(request.headers)}')
         tenant_id = request.headers.get("tenant_id")
         await validate_tenant(tenant_id=tenant_id)
