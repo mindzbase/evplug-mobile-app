@@ -17,4 +17,4 @@ COPY . .
 
 EXPOSE 8080 8765 80
 
-CMD ["python", "server.py"]
+# CMD ["python", "server.py"]
