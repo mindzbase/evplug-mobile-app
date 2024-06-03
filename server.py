@@ -60,7 +60,6 @@ async def main():
     # await asyncio.wait([server.wait_closed(), site.start(), init_consumer()])
     # await asyncio.wait([server.wait_closed(), site.start()])
     logging.info('reaching to server.py in info file')
-    print("reaching to server.py")
     await asyncio.wait([asyncio.create_task(server.wait_closed()), asyncio.create_task(site.start())])
 
 try:
