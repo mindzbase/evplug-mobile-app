@@ -382,9 +382,9 @@ async def does_business_have_mobile_app(tenant_id):
     query = f"""
         select * from businesses where tenant_id='{tenant_id}';
     """
-    logging.info("Query: " + query)
+    logging.info(f'business mobile query: {query}')
     res = await helperdao.fetchone_dict(query)
-    logging.info("res: " + res)
+    logging.info(f'business mobile res: {res}')
     res = res if res else {}
     return bool(res.get("have_mobile_app", False))
 
@@ -834,9 +834,9 @@ async def get_tenant_detail(tenant_id):
     query = f"""
         SELECT * FROM `businesses` WHERE `tenant_id`='{tenant_id}'
     """
-    logging.info("get tenant query:",query)
+    logging.info(f'get tenant query: {query}')
     res = await helperdao.fetchone_dict(query)
-    logging.info("get tenant res:",res)
+    logging.info(f'Res: {res}')
     return res.get("tenant_id") if res else None
 
 
