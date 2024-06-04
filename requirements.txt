@@ -9,8 +9,8 @@ aiormq==6.7.4
 aiosignal==1.2.0
 aiosmtplib==2.0.0
 anyio==3.6.2
-async-firebase==2.3.0
-async-timeout==4.0.2
+async-firebase==3.8.0
+async-timeout==4.0.3
 attrs==22.1.0
 cachetools==5.3.0
 certifi==2022.12.7
