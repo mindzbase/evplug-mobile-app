@@ -1,7 +1,7 @@
 aio-pika==9.0.5
 aiocache==0.12.2
 aiocron==1.8
-aiohttp==3.8.3
+aiohttp==3.9.5
 aiohttp-cors==0.7.0
 aiohttp-tokenauth==0.0.2
 aiomysql==0.1.1
