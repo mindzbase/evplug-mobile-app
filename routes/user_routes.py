@@ -566,6 +566,7 @@ async def start_charging_v2(request: web.Request) -> web.Response:
         business_mobile_app = request["business_mobile_app"]
         should_start_charging = True
         id_tag = await user_dao.get_users_id_tag(user_id, tenant_id)
+        logging.info(f'Id Tag : {id_tag}')
         charger_details = await user_dao.charger_detail(
             charger_id=charger_id,
             tenant_id=tenant_id,
@@ -591,6 +592,7 @@ async def start_charging_v2(request: web.Request) -> web.Response:
             connector_id=connector_id,
             tenant_id=tenant_id
         )
+        logging.info(f'is_session_started : {is_session_started}')
 
         if is_session_started:
             await fcm.send_notification(

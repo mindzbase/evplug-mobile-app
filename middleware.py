@@ -80,7 +80,6 @@ async def tenant_and_user_middleware(request, handler):
             r"\/webapp\/\w+\/\w+\/",
             r"\/webapp\/\w+\/",
         ]
-        logging.info(f'All Request Headers: {dict(request.headers)}')
         tenant_id = request.headers.get("tenant_id")
         await validate_tenant(tenant_id=tenant_id)
         request['tenant_id'] = tenant_id
@@ -88,10 +87,8 @@ async def tenant_and_user_middleware(request, handler):
         request['business_mobile_app'] = business_mobile_app
         compiled_exclude_paths = [re.compile(pattern) for pattern in exclude_paths]
         if any(pattern.match(request.path) for pattern in compiled_exclude_paths):
-            logging.info("reaching in exclude folder using logging")
             return await handler(request)
         else:
-            logging.info("reaching in else folder using logging")
             authorization = request.headers.get('Authorization')
             user_id = authorization.replace('token ', '')
             await validate_token(
