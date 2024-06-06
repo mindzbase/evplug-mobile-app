@@ -3,7 +3,7 @@ import re
 from dao import user_dao
 from dao import app_dao
 from aiohttp import web
-import logging
+
 
 # async def validate_token(user_id: str, tenant_id: str, business_mobile_app: bool):
 #     try:
@@ -66,7 +66,6 @@ async def validate_tenant(tenant_id):
 
 @web.middleware
 async def tenant_and_user_middleware(request, handler):
-    logging.info("reaching in middleware")
     try:
         exclude_paths = [
             r"/auth/\w+",
@@ -80,12 +79,31 @@ async def tenant_and_user_middleware(request, handler):
             r"\/webapp\/\w+\/\w+\/",
             r"\/webapp\/\w+\/",
         ]
-        tenant_id = request.headers.get("tenant_id")
-        await validate_tenant(tenant_id=tenant_id)
-        request['tenant_id'] = tenant_id
-        business_mobile_app = await app_dao.does_business_have_mobile_app(tenant_id)
+        payment_gateway_paths = [
+            "/server/payzone/callback/"
+        ]
+        for pgp in payment_gateway_paths:
+            if (pgp == request.path):
+                return await handler(request)
+        enterprise_mobile_app = request.headers.get(
+            "enterprise_mobile_app", False)
+        tenant_id = request.headers.get("tenant_id", "")
+        business_mobile_app = False
+
+        if not enterprise_mobile_app:
+            await validate_tenant(tenant_id=tenant_id)
+            request['tenant_id'] = tenant_id
+            business_mobile_app = await app_dao.does_business_have_mobile_app(tenant_id)
+        elif enterprise_mobile_app and tenant_id:
+            await validate_tenant(tenant_id=tenant_id)
+            request['tenant_id'] = tenant_id
+        else:
+            request['tenant_id'] = ""
+
         request['business_mobile_app'] = business_mobile_app
-        compiled_exclude_paths = [re.compile(pattern) for pattern in exclude_paths]
+
+        compiled_exclude_paths = [re.compile(
+            pattern) for pattern in exclude_paths]
         if any(pattern.match(request.path) for pattern in compiled_exclude_paths):
             return await handler(request)
         else:

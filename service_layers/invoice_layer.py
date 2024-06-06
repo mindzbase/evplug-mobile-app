@@ -98,7 +98,7 @@ async def get_additional_details_from_session_parameters(
             bill_by_string = (
                 "By Unit (kWh)"
                 if stop_charging_by == "max_energy_consumption"
-                else "By Time (Hour)"
+                else "By Time (Minutes)"
             )
             if stop_charging_by == "max_energy_consumption":
                 cost = total_energy_used * price
@@ -209,7 +209,8 @@ async def get_gateway_fee(org_id, organisation_details):
         gateway_fee = organisation_details.get("gateway_fee", 0)
     else:
         org_details = await user_dao.get_parent_org_id(org_id)
-        parent_org_id = org_details.get("parent_org_id") if org_details else None
+        parent_org_id = org_details.get(
+            "parent_org_id") if org_details else None
         organisation_details = await user_dao.get_organisation_properties(
             org_id=parent_org_id
         )
@@ -229,7 +230,8 @@ async def create_invoice(
         location_name = session_parameter_details.get("location_name")
         location_id = session_parameter_details.get("location_id")
         elapsed_time = session_parameter_details.get("elapsed_time")
-        session_start_time = session_parameter_details.get("session_start_time")
+        session_start_time = session_parameter_details.get(
+            "session_start_time")
         total_energy_used = (
             float(session_parameter_details.get("final_meter_value"))
             - float(session_parameter_details.get("initial_meter_value"))

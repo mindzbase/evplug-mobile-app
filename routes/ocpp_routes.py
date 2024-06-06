@@ -7,14 +7,16 @@ import logging
 import math
 from datetime import datetime
 from typing import Any, Dict
-
+import asyncio
 from aiohttp import ClientConnectorError, web
 from dateutil.parser import parse
 
 import fcm
+from service_layers.app_layer import get_tenant_ids_based_on_mobile_app
+from service_layers.rfid_layer import get_rfid_of_user
 import utils
 from dao import firebase_dao, user_dao
-from dao.app_dao import does_business_have_mobile_app
+from dao.app_dao import business_details_and_properties, does_business_have_mobile_app, get_enterprise_properties
 
 # from dao.app_dao import get_group_plans
 from errors.mysql_error import MissingObjectOnDB, ParameterMissing
@@ -29,9 +31,11 @@ from smart_queue import (
 )
 from utils import (
     calculate_base_and_tax,
+    calculate_cost,
     calculate_tax_and_total,
     check_object_existence,
     create_pdf,
+    get_value_without_tax,
     idle_charging_info_and_send_invoice,
     stop_charging,
     validate_parameters,
@@ -89,7 +93,8 @@ async def check_wallet_balance(request: web.Request) -> web.Response:
 
         if has_mobile_app is False:
             org_details = await user_dao.get_parent_org_id(org_id=org_id)
-            parent_org_id = org_details.get("parent_org_id") if org_details else None
+            parent_org_id = org_details.get(
+                "parent_org_id") if org_details else None
             if parent_org_id:
                 res = await user_dao.get_organisation_properties(org_id=parent_org_id)
                 for ele in res:
@@ -137,7 +142,8 @@ async def check_wallet_balance(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -164,6 +170,7 @@ async def set_session_parameters(request: web.Request) -> web.Response:
         user_id = await user_dao.get_user_from_id_tag(
             id_tag=id_tag,
             tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app
         )
         LOGGER.info(user_id)
         check_object_existence(user_id, "User Rfid Link")
@@ -185,42 +192,23 @@ async def set_session_parameters(request: web.Request) -> web.Response:
                 business_mobile_app=business_mobile_app,
             )
 
-        plan_id = 0
-        plan_id = await user_dao.check_user_have_private_plans(
-            user_id=user_id,
-            charger_id=charger_id,
-            connector_id=connector_id,
-            tenant_id=tenant_id,
+        price_detail = await user_dao.get_price_plan_of_user(
+            user_id, charger_id, connector_id, tenant_id
         )
-        if not plan_id:
-            plan_id = await user_dao.get_charging_plan_of_connector(
-                charger_id=charger_id,
-                connector_id=connector_id,
-                tenant_id=tenant_id,
-            )
-        if not plan_id:
-            plan_id = await user_dao.get_charging_plan_of_location(
-                charger_id=charger_id,
-                tenant_id=tenant_id,
-            )
-        check_object_existence(plan_id, "Price Plan")
+        apply_after = price_detail["apply_after"]
+        fixed_starting_fee = price_detail["fixed_starting_fee"]
+        idle_charging_fee = price_detail["idle_charging_fee"]
+        billing_type = price_detail["billing_type"]
+        price = float(price_detail["price"])
+        plan_id = price_detail['id']
+        plan_type = price_detail["type"]
 
-        price_detail = await user_dao.get_pricing_plan(
-            price_id=plan_id,
-            tenant_id=tenant_id,
-        )
-        check_object_existence(price_detail, "Price Plan")
-
-        apply_after = price_detail.get("apply_after")
-        fixed_starting_fee = price_detail.get("fixed_starting_fee")
-        idle_charging_fee = price_detail.get("idle_charging_fee")
-        billing_type = price_detail.get("billing_type")
-        price = float(price_detail.get("price"))
-        plan_type = price_detail.get("type")
         total_minutes = 0
         total_energy = 0
+
         if billing_type == "per_minute":
-            total_minutes = 120 if (price == 0) else math.floor(wallet_balance / price)
+            total_minutes = 120 if (price == 0) else math.floor(
+                wallet_balance / price)
             stop_charging_by = "duration_in_minutes"
         elif billing_type == "per_kWh":
             total_energy = 45 if (price == 0) else (wallet_balance / price)
@@ -245,11 +233,13 @@ async def set_session_parameters(request: web.Request) -> web.Response:
             fixed_starting_fee=fixed_starting_fee,
             idle_charging_fee=idle_charging_fee,
         )
+
         await send_message_to_client(
             key=user_id,
             tenant_id=tenant_id,
             event_name="session_id",
-            data={"session_id": session_id},
+            data={"session_id": session_id, "tenant_id": tenant_id},
+            business_mobile_app=business_mobile_app,
         )
         # res = await user_dao.get_latest_payment_intent_id(
         #     charger_id, connector_id, user_id
@@ -271,7 +261,8 @@ async def set_session_parameters(request: web.Request) -> web.Response:
         # rearrange_queue(location_id)
         return web.Response(
             status=200,
-            body=json.dumps({"msg": "session paramters are sucessfully added."}),
+            body=json.dumps(
+                {"msg": "session paramters are sucessfully added."}),
             content_type="application/json",
         )
     except MissingObjectOnDB as e:
@@ -284,7 +275,8 @@ async def set_session_parameters(request: web.Request) -> web.Response:
         LOGGER.error(e, stacklevel=10, stack_info=True)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -296,6 +288,7 @@ async def session_finished(request: web.Request) -> web.Response:
         session_id = data.get("transaction_id")
         tenant_id = data.get("tenant_id")
         validate_parameters(session_id, tenant_id)
+        business_mobile_app = await does_business_have_mobile_app(tenant_id)
         res = await user_dao.get_session_detail(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -306,6 +299,7 @@ async def session_finished(request: web.Request) -> web.Response:
         user_id = await user_dao.get_user_from_id_tag(
             id_tag=id_tag,
             tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app
         )
         event_name = "stop_charging"
         data = {"session_id": session_id, "tenant_id": tenant_id}
@@ -314,7 +308,8 @@ async def session_finished(request: web.Request) -> web.Response:
             key=user_id,
             tenant_id=tenant_id,
             event_name="stop_charging",
-            data=data
+            data=data,
+            business_mobile_app=business_mobile_app
         )
         await fcm.send_notification(
             title="Session Completed",
@@ -347,12 +342,15 @@ async def session_finished(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
 
-async def initiate_remote_stop(session_id, id_tag, user_id, tenant_id):
+async def initiate_remote_stop(
+    session_id, id_tag, user_id, tenant_id, business_mobile_app
+):
     if session_id:
         (is_stopped, msg) = await remote_stop(
             session_id=session_id,
@@ -369,8 +367,9 @@ async def initiate_remote_stop(session_id, id_tag, user_id, tenant_id):
             await send_message_to_client(
                 key=user_id,
                 event_name="stop_charging",
-                data={"session_id": session_id},
+                data={"session_id": session_id, "tenant_id": tenant_id},
                 tenant_id=tenant_id,
+                business_mobile_app=business_mobile_app
             )
     return
 
@@ -397,7 +396,8 @@ async def get_pdf(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -499,7 +499,8 @@ async def phonepecallback(request: web.Request):
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -523,21 +524,19 @@ async def generate_invoice(session_id, org_id):
 
 async def get_necessary_session_details(session_id, start_time, tenant_id):
     try:
-        session_meter_values_result = await user_dao.get_session_meter_values(
+        meter_values = await user_dao.get_session_meter_values(
             session_id=int(session_id), tenant_id=tenant_id
         )
 
-        if not session_meter_values_result:
+        if not meter_values:
             raise MissingObjectOnDB(f"meter value for session {session_id}")
 
-        initial_meter_value = session_meter_values_result.get("initial_meter_value")
-        energy_import_register = session_meter_values_result.get(
-            "energy_import_register"
-        )
-        energy_import_unit = session_meter_values_result.get("energy_import_unit")
-        power_import_unit = session_meter_values_result.get("power_import_unit")
-        power_import_register = session_meter_values_result.get("power_import")
-        soc = session_meter_values_result.get("soc")
+        initial_meter_value = meter_values.get("initial_meter_value")
+        energy_import_register = meter_values.get("energy_import_register")
+        energy_import_unit = meter_values.get("energy_import_unit")
+        power_import_unit = meter_values.get("power_import_unit")
+        power_import_register = meter_values.get("power_import")
+        soc = meter_values.get("soc")
 
         current_time = datetime.utcnow()
         duration = current_time - start_time
@@ -558,24 +557,22 @@ async def get_necessary_session_details(session_id, start_time, tenant_id):
         session_paramters = await user_dao.get_session_paramters(
             session_id=session_id, tenant_id=tenant_id
         )
-        LOGGER.info(f"""{session_id} : get_session_paramters : {session_paramters}""")
+
         if not session_paramters:
-            raise MissingObjectOnDB(f"session paramter for session {session_id}")
-        stop_charging_by = session_paramters.get("stop_charging_by")
-        price = session_paramters.get("price")
-        fixed_starting_fee = session_paramters.get("fixed_starting_fee")
+            raise MissingObjectOnDB(
+                f"session paramter for session {session_id}")
 
         spent_duration = current_time - start_time
         hours, remainder = divmod(spent_duration.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)
-        spent_duration_string = "{:02} hr:{:02} min".format(int(hours), int(minutes))
-        spent_duration_without_format = "{:02}:{:02}".format(int(hours), int(minutes))
+        spent_duration_string = "{:02} hr:{:02} min".format(
+            int(hours), int(minutes))
+        spent_duration_without_format = "{:02}:{:02}".format(
+            int(hours), int(minutes))
 
         return {
             session_id: {
                 "session_id": int(session_id),
-                "stop_charging_by": stop_charging_by,
-                "price": price,
                 "spent_minutes": spent_duration.total_seconds() / 60,
                 "energy_import_register": energy_import_register,
                 "spent_duration_string": spent_duration_string,
@@ -583,7 +580,10 @@ async def get_necessary_session_details(session_id, start_time, tenant_id):
                 "power_import_register": power_import_register,
                 "elapsed_time": "{:02}:{:02}".format(int(hours), int(minutes)),
                 "soc": soc,
-                "fixed_starting_fee": fixed_starting_fee,
+                "price": session_paramters.get("price"),
+                "stop_charging_by": session_paramters.get("stop_charging_by"),
+                "fixed_starting_fee": session_paramters.get("fixed_starting_fee", 0),
+                "tenant_id": tenant_id
             }
         }
     except MissingObjectOnDB as e:
@@ -594,39 +594,48 @@ async def get_necessary_session_details(session_id, start_time, tenant_id):
         return {}
 
 
-async def get_session_cost(session, tenant_id):
+async def get_session_cost(session, tenant_id, business_mobile_app):
     try:
-        cost = 0
-        cost_with_tax = 0
-        if not session:
-            session.update({"cost": 0})
-            return
-        stop_charging_by = session.get("stop_charging_by")
-        price = session.get("price")
-        fixed_starting_fee = session.get("fixed_starting_fee")
-        spent_minutes = session.get("spent_minutes")
-        energy_import_register = session.get("energy_import_register")
-        # LOGGER.info(f"""{session.get('id')}: stop_charging_by: {f_by}""")
-        if stop_charging_by == "duration_in_minutes":
-            cost = 0 if (price == 0) else (spent_minutes * price)
+        cost = {"cost_with_tax": 0}
+        if session:
+            business_properties = await business_details_and_properties(
+                tenant_id=tenant_id)
 
-        elif stop_charging_by == "max_energy_consumption":
-            cost = 0 if (price == 0) else (energy_import_register * price)
-        if cost != 0:
-            price_include_tax = 0
-            tax_percentage = 5
-            if not price_include_tax:
-                cost = cost + fixed_starting_fee
-                tax, cost_with_tax = calculate_tax_and_total(
-                    base_amount=cost, tax_percentage=tax_percentage
+            tax_percentage = float(
+                business_properties.get("tax_percentage", 5))
+
+            if business_mobile_app:
+                price_include_tax = bool(
+                    int(business_properties.get("price_include_tax", 1))
                 )
             else:
-                cost_with_tax = cost
-                cost, tax = calculate_base_and_tax(
-                    total_amount=cost_with_tax, tax_percentage=tax_percentage
+                enterprise_property = await get_enterprise_properties()
+                price_include_tax = bool(
+                    int(enterprise_property.get("price_include_tax", 1))
                 )
-        session.update({"cost": cost, "cost_with_tax": cost_with_tax})
+
+            price = session.get("price", 0)
+            fixed_starting_fee = session.get("fixed_starting_fee", 0)
+
+            if price_include_tax:
+                price = get_value_without_tax(
+                    with_tax=price, tax_percent=tax_percentage)
+                fixed_starting_fee = get_value_without_tax(
+                    with_tax=fixed_starting_fee, tax_percent=tax_percentage)
+
+            cost_dict = calculate_cost(
+                price=price,
+                tax_percent=tax_percentage,
+                fixed_starting_fee=fixed_starting_fee,
+                bill_by=session.get("stop_charging_by"),
+                minutes=session.get("spent_minutes"),
+                energy_units_kWh=session.get("energy_import_register"),
+            )
+
+            cost["cost_with_tax"] = cost_dict["final_cost"]
+        session.update(cost)
         return
+
     except Exception as e:
         LOGGER.error(e)
 
@@ -635,14 +644,19 @@ async def get_session_cost(session, tenant_id):
 async def meter_values_v3(request: web.Request) -> web.Response:
     try:
         data = await request.json()
-        session_id = data.get("session_id")
-        tenant_id = data.get("tenant_id")
-        validate_parameters(session_id, tenant_id)
-        business_mobile_app = await does_business_have_mobile_app(tenant_id)
-        # session can be started with id tag admin (not implimented)
+        current_session_id = data.get("session_id")
+        current_tenant_id = data.get("tenant_id")
+        current_session_cost = 0
+        validate_parameters(current_session_id, current_tenant_id)
+
+        business_mobile_app = await does_business_have_mobile_app(current_tenant_id)
+        tenant_id_list = await get_tenant_ids_based_on_mobile_app(
+            tenant_id=current_tenant_id,
+            business_mobile_app=business_mobile_app,
+        )
 
         is_running, id_tag, start_time = await user_dao.is_session_running_v2(
-            session_id=session_id, tenant_id=tenant_id,
+            session_id=current_session_id, tenant_id=current_tenant_id,
         )
 
         if not is_running:
@@ -651,125 +665,171 @@ async def meter_values_v3(request: web.Request) -> web.Response:
                 body=json.dumps({"msg": "No session running on charger!"}),
                 content_type="application/json",
             )
+
         user_id = await user_dao.get_user_from_id_tag(
-            id_tag=id_tag, tenant_id=tenant_id,
+            id_tag=id_tag, tenant_id=current_tenant_id,
+            business_mobile_app=business_mobile_app
         )
-        id_tags = await user_dao.get_id_tags_by_user_id(
-            user_id=user_id, tenant_id=tenant_id,
-        )
-        check_object_existence(id_tags, "Rfid card")
-        id_tags_str = "', '".join(id_tags)
 
-        list_of_sessions = await user_dao.get_all_running_session_by_id_tags(
-            id_tags=id_tags_str, tenant_id=tenant_id,
-        )
-        all_sessions = {}
-        tasks = []
-        import asyncio
-
-        for session in list_of_sessions:
-            LOGGER.info(session)
-            tasks.append(
-                get_necessary_session_details(
-                    session_id=session.get("id"),
-                    start_time=session.get("start_time"),
-                    tenant_id=tenant_id,
-                )
-            )
-        results = await asyncio.gather(*tasks) if tasks else []
-        {all_sessions.update(x) for x in results} if results else {}
-        free_charging_minutes = 120
+        stop_task = []
+        final_id_tag_dict = {}
         free_charging_energy = 45
+        free_charging_minutes = 120
+        should_cut_charging = False
+        current_session = {}
+
+        final_id_tag_dict = await get_rfid_of_user(
+            business_mobile_app, user_id, tenant_id_list
+        )
+        check_object_existence(final_id_tag_dict, "Rfid card")
+
         result = await user_dao.get_wallet_balance(
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant_id=current_tenant_id,
             business_mobile_app=business_mobile_app,
         )
         wallet_balance = result.get("wallet_balance")
-        overall_cost = 0
-        cost_tasks = []
-        sessions_to_stop = []
-        for session in all_sessions.values():
-            sessions_to_stop.append(session.get("session_id"))
-            cost_tasks.append(get_session_cost(session=session, tenant_id=tenant_id))
-        await asyncio.gather(*cost_tasks)
-        for session in all_sessions.values():
-            overall_cost += session.get("cost_with_tax", 0)
 
-        stop_charging_by = all_sessions[int(session_id)].get("stop_charging_by")
-        spent_minutes = all_sessions[int(session_id)].get("spent_minutes")
-        elapsed_time = all_sessions[int(session_id)].get("elapsed_time")
-        energy_import_register = all_sessions[int(session_id)].get(
-            "energy_import_register", 0
-        )
-        spent_duration_string = all_sessions[int(session_id)].get(
-            "spent_duration_string"
-        )
-        power_import_register = all_sessions[int(session_id)].get(
-            "power_import_register"
-        )
-        cost = all_sessions[int(session_id)].get("cost_with_tax", 0)
-        soc = all_sessions[int(session_id)].get("soc")
-        stop_task = []
-        should_cut_charging = False
-        should_cut_charging = await energy_zero_cutoff(
-            session_id=session_id,
-            stop_task=stop_task,
-            id_tag=id_tag,
-            user_id=user_id,
-            tenant_id=tenant_id,
-        )
-        if overall_cost != 0 and not should_cut_charging:
-            # org_minimum_balance = await user_dao.get_organisations_property(
-            #     org_ids=org_id, parameter_key="minimum_wallet_balance"
-            # )
-            org_minimum_balance = 10
-            # payment_method_details = await user_dao.get_payment_intent_id(
-            #     session_id=session_id
-            # )
-            # payment_method = (
-            #     "wallet"
-            #     if not payment_method_details
-            #     else payment_method_details.get("payment_intent_id")
-            # )
-            payment_method = "wallet"
-            if payment_method != "wallet":
-                should_cut_charging = await card_excess_cost_cutoff(
-                    cost=cost,
-                    id_tag=id_tag,
-                    user_id=user_id,
-                    stop_task=stop_task,
-                    session_id=session_id,
-                    payment_intent_id=payment_method,
-                    threshold=org_minimum_balance,
-                    tenant_id=tenant_id,
+        sessions_to_stop = {}
+        all_sessions = {}
+
+        for tenant in tenant_id_list:
+            id_tags = final_id_tag_dict[tenant]
+            id_tags_str = "', '".join(id_tags)
+            all_sessions[tenant] = {}
+            tasks = []
+
+            list_of_sessions = await user_dao.get_all_running_session_by_id_tags(
+                id_tags=id_tags_str, tenant_id=tenant,
+            )
+
+            for session in list_of_sessions:
+                tasks.append(
+                    get_necessary_session_details(
+                        session_id=session.get("id"),
+                        start_time=session.get("start_time"),
+                        tenant_id=tenant,
+                    )
                 )
-            else:
-                should_cut_charging = await wallet_excess_cost_cutoff(
-                    id_tag=id_tag,
-                    user_id=user_id,
-                    stop_task=stop_task,
-                    wallet_balance=wallet_balance,
-                    sessions_to_stop=sessions_to_stop,
-                    threshold=overall_cost + org_minimum_balance,
-                    tenant_id=tenant_id,
+
+            results = await asyncio.gather(*tasks) if tasks else []
+
+            if results:
+                for x in results:
+                    all_sessions[tenant].update(x)
+
+        current_session_id = int(current_session_id)
+        if (all_sessions[current_tenant_id].get(current_session_id)):
+            current_session = all_sessions[current_tenant_id].pop(
+                current_session_id
+            )
+
+            stop_charging_by = current_session.get("stop_charging_by")
+            spent_minutes = current_session.get("spent_minutes")
+            elapsed_time = current_session.get("elapsed_time")
+            cost = current_session.get("cost_with_tax", 0)
+            soc = current_session.get("soc")
+            energy_import_register = current_session.get(
+                "energy_import_register", 0)
+
+            should_cut_charging = await energy_zero_cutoff(
+                session_id=current_session_id,
+                stop_task=stop_task,
+                id_tag=id_tag,
+                user_id=user_id,
+                tenant_id=current_tenant_id,
+                business_mobile_app=business_mobile_app
+            )
+
+            if not should_cut_charging:
+                await get_session_cost(
+                    tenant_id=current_tenant_id,
+                    session=current_session,
+                    business_mobile_app=business_mobile_app
                 )
-        elif overall_cost == 0 and not should_cut_charging:
-            if stop_charging_by == "duration_in_minutes":
-                if int(spent_minutes) >= int(free_charging_minutes):
-                    # await initiate_remote_stop(
-                    #     session_id=session_id, id_tag=id_tag, user_id=user_id
-                    # )
-                    LOGGER.info("Inside time spent_minutes >= free_Charging_minutes")
-            elif stop_charging_by == "max_energy_consumption":
-                if float(energy_import_register) >= float(free_charging_energy):
-                    # await initiate_remote_stop(
-                    #     session_id=session_id, id_tag=id_tag, user_id=user_id
-                    # )
-                    LOGGER.info("Inside energy cost == 0 energy")
+                cost = current_session.get("cost_with_tax", 0)
+
+                if cost == 0:
+                    if stop_charging_by == "duration_in_minutes":
+                        if int(spent_minutes) >= int(free_charging_minutes):
+                            # await initiate_remote_stop(
+                            #     session_id=session_id, id_tag=id_tag, user_id=user_id
+                            # )
+                            LOGGER.info(
+                                "Inside time spent_minutes >= free_Charging_minutes")
+                    elif stop_charging_by == "max_energy_consumption":
+                        if float(energy_import_register) >= float(free_charging_energy):
+                            # await initiate_remote_stop(
+                            #     session_id=session_id, id_tag=id_tag, user_id=user_id
+                            # )
+                            LOGGER.info("Inside energy cost == 0 energy")
+
+        overall_cost = 0
+
+        for tenant, sessions in all_sessions.items():
+            session_stop_list = []
+            cost_tasks = []
+
+            for session in sessions.values():
+                session_stop_list.append(session.get("session_id"))
+                cost_tasks.append(get_session_cost(
+                    session=session,
+                    tenant_id=tenant,
+                    business_mobile_app=business_mobile_app,
+                ))
+
+            if tenant == current_tenant_id and current_session:
+                sessions.update(
+                    {current_session["session_id"]: current_session})
+                session_stop_list.append(current_session.get("session_id"))
+
+            sessions_to_stop[tenant] = session_stop_list
+            await asyncio.gather(*cost_tasks)
+
+            for session in sessions.values():
+                overall_cost += session.get("cost_with_tax", 0)
+
+        if overall_cost != 0 and not should_cut_charging and sessions_to_stop:
+            for tenant, sessions_stop_list in sessions_to_stop.items():
+                # org_minimum_balance = await user_dao.get_organisations_property(
+                #     org_ids=org_id, parameter_key="minimum_wallet_balance"
+                # )
+                org_minimum_balance = 10
+                payment_method = "wallet"
+                cost = current_session.get("cost_with_tax", 0)
+                if payment_method != "wallet":
+                    should_cut_charging = await card_excess_cost_cutoff(
+                        cost=cost,
+                        id_tag=id_tag,
+                        user_id=user_id,
+                        stop_task=stop_task,
+                        session_id=current_session_id,
+                        payment_intent_id=payment_method,
+                        threshold=org_minimum_balance,
+                        tenant_id=tenant,
+                        business_mobile_app=business_mobile_app
+                    )
+                else:
+                    should_cut_charging = await wallet_excess_cost_cutoff(
+                        id_tag=id_tag,
+                        user_id=user_id,
+                        stop_task=stop_task,
+                        wallet_balance=wallet_balance,
+                        sessions_to_stop=sessions_stop_list,
+                        threshold=overall_cost + org_minimum_balance,
+                        tenant_id=tenant,
+                        business_mobile_app=business_mobile_app
+                    )
 
         if should_cut_charging:
             await asyncio.gather(*stop_task) if stop_task else ""
+
+        spent_duration_string = current_session.get(
+            "spent_duration_string")
+        power_import_register = current_session.get(
+            "power_import_register")
+        energy_import_register = current_session.get(
+            "energy_import_register", 0)
 
         data = {
             "time_elapsed": spent_duration_string,
@@ -777,21 +837,22 @@ async def meter_values_v3(request: web.Request) -> web.Response:
             "power": str(power_import_register),
             "price": "{0:.2f}".format(cost),
             "soc": soc,
-            "session_id": session_id,
+            "session_id": current_session_id,
+            "tenant_id": current_tenant_id
         }
+
         await check_and_send_session_related_notification(
-            user_id, session_id, soc, cost, elapsed_time, tenant_id
+            user_id, current_session_id, soc, cost, elapsed_time, current_tenant_id
         )
-        LOGGER.info(data)
-        user_id = await user_dao.get_user_from_id_tag(
-            id_tag=id_tag, tenant_id=tenant_id
-        )
+
         await send_message_to_client(
             key=user_id,
             event_name="meter_values",
             data=data,
-            tenant_id=tenant_id,
+            tenant_id=current_tenant_id,
+            business_mobile_app=business_mobile_app
         )
+
         return web.Response(
             status=200,
             body=json.dumps(data),
@@ -810,7 +871,8 @@ async def meter_values_v3(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -837,6 +899,7 @@ async def check_and_send_session_related_notification(
                             "action": "notification_limit_reached",
                             "sessionId": session_id,
                             "user_id": user_id,
+                            "tenant_id": tenant_id,
                             "title": f"Your SoC has exceeded {soc} %",
                             "body": "click on stop charging to stop the session now!",
                         },
@@ -855,6 +918,7 @@ async def check_and_send_session_related_notification(
                             "action": "notification_limit_reached",
                             "sessionId": session_id,
                             "user_id": user_id,
+                            "tenant_id": tenant_id,
                             "title": f"Your session cost has exceeded {notification_value}",  # noqa
                             "body": "click on stop charging to stop the session now!",
                         },
@@ -863,7 +927,8 @@ async def check_and_send_session_related_notification(
             elif notification_type == "duration":
                 elapsed_time = datetime.strptime(elapsed_time, "%H:%M")
                 elapsed_time = elapsed_time.time()
-                notification_value = datetime.strptime(notification_value, "%H:%M")
+                notification_value = datetime.strptime(
+                    notification_value, "%H:%M")
                 notification_value = notification_value.time()
                 if notification_value <= elapsed_time:
                     await send_firebase_notification_if_not_sent(
@@ -876,6 +941,7 @@ async def check_and_send_session_related_notification(
                             "action": "notification_limit_reached",
                             "sessionId": session_id,
                             "user_id": user_id,
+                            "tenant_id": tenant_id,
                             "title": f"Your session time has exceeded {str(notification_value)}",  # noqa
                             "body": "click on stop charging to stop the session now!",
                         },
@@ -887,7 +953,9 @@ async def check_and_send_session_related_notification(
         return
 
 
-async def energy_zero_cutoff(session_id, stop_task, id_tag, user_id, tenant_id):
+async def energy_zero_cutoff(
+    session_id, stop_task, id_tag, user_id, tenant_id, business_mobile_app
+):
     should_cut_charging = False
     session_details = await user_dao.get_session_detail_by_id(session_id, tenant_id)
     if not session_details:
@@ -917,6 +985,7 @@ async def energy_zero_cutoff(session_id, stop_task, id_tag, user_id, tenant_id):
                     id_tag=id_tag,
                     user_id=user_id,
                     tenant_id=tenant_id,
+                    business_mobile_app=business_mobile_app
                 )
             )
             should_cut_charging = True
@@ -933,6 +1002,7 @@ async def card_excess_cost_cutoff(
     payment_intent_id,
     threshold,
     tenant_id,
+    business_mobile_app
 ):
     should_cut_charging = False
     payment_intent_details = await user_dao.get_payment_intent_detail(payment_intent_id)
@@ -945,6 +1015,7 @@ async def card_excess_cost_cutoff(
                 id_tag=id_tag,
                 user_id=user_id,
                 tenant_id=tenant_id,
+                business_mobile_app=business_mobile_app
             )
         )
         should_cut_charging = True
@@ -953,7 +1024,8 @@ async def card_excess_cost_cutoff(
 
 
 async def wallet_excess_cost_cutoff(
-    threshold, wallet_balance, sessions_to_stop, stop_task, id_tag, user_id, tenant_id
+    threshold, wallet_balance, sessions_to_stop, stop_task,
+    id_tag, user_id, tenant_id, business_mobile_app
 ):
     should_cut_charging = False
     if float(wallet_balance) <= float(threshold):
@@ -964,6 +1036,7 @@ async def wallet_excess_cost_cutoff(
                     id_tag=id_tag,
                     user_id=user_id,
                     tenant_id=tenant_id,
+                    business_mobile_app=business_mobile_app
                 )
             )
             should_cut_charging = True
@@ -982,17 +1055,19 @@ async def start_idle_session(request: web.Request) -> web.Response:
         session_id = data.get("transaction_id")
         tenant_id = data.get("tenant_id")
         validate_parameters(session_id, tenant_id)
-        invoice = await user_dao.get_invoice_by_session_id(
+        business_mobile_app = await does_business_have_mobile_app(tenant_id)
+        parameter = await user_dao.get_additional_details_from_session_parameters(
             session_id=session_id,
             tenant_id=tenant_id,
         )
-        user_id = invoice["invoice"]["user_id"] if invoice else None
+        user_id = parameter["user_id"] if parameter else None
         if user_id:
             await send_message_to_client(
                 key=user_id,
                 event_name="idle_session_started",
-                data={"session_id": session_id},
+                data={"session_id": session_id, "tenant_id": tenant_id},
                 tenant_id=tenant_id,
+                business_mobile_app=business_mobile_app
             )
         return web.Response(
             status=200,
@@ -1008,7 +1083,8 @@ async def start_idle_session(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -1021,6 +1097,7 @@ async def user_idle_fee(request: web.Request) -> web.Response:
         session_id = data.get("transaction_id")
         tenant_id = data.get("tenant_id")
         validate_parameters(session_id, tenant_id)
+        business_mobile_app = await does_business_have_mobile_app(tenant_id)
         invoice = await user_dao.get_invoice_by_session_id(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -1040,8 +1117,9 @@ async def user_idle_fee(request: web.Request) -> web.Response:
             await send_message_to_client(
                 key=user_id,
                 event_name="idle_session_close",
-                data={"session_id": session_id},
+                data={"session_id": session_id, "tenant_id": tenant_id},
                 tenant_id=tenant_id,
+                business_mobile_app=business_mobile_app
             )
         return web.Response(
             status=200,
@@ -1057,7 +1135,8 @@ async def user_idle_fee(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )
 
@@ -1245,6 +1324,78 @@ async def redirect_window(request: web.Request) -> web.Response:
         LOGGER.error(e)
         return web.Response(
             status=500,
-            body=json.dumps({"msg": f"Internal Server error occured with error {e}"}),
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
+            content_type="application/json",
+        )
+
+
+@ocpp_routes.post("/server/payzone/callback/")
+async def payzone_callback(request: web.Request) -> web.Response:
+    try:
+        raw_content = await request.content.read()
+        callback_body = json.loads(
+            raw_content) if raw_content is not None else ""
+
+        status = callback_body.get("status")
+        merchantPaymentId = callback_body.get(
+            "id")
+        paymentGatewayPaymentId = callback_body.get(
+            "internalId"
+        )
+        paymentType = callback_body.get("paymentType")
+        paymentMethod = callback_body.get("paymentMethod")
+        data = callback_body.get("transactions")
+        amount = callback_body.get("lineItem").get("amount")
+        tenant_id = callback_body.get(
+            "properties").get("tenant_id")
+
+        await user_dao.update_payzone_transaction(
+            status=status,
+            merchantPaymentId=merchantPaymentId,
+            paymentGatewayPaymentId=paymentGatewayPaymentId,
+            paymentType=paymentType,
+            paymentMethod=paymentMethod,
+            data=json.dumps(data),
+            tenant_id=tenant_id
+        )
+
+        if (status == "CHARGED" or status == "CHARGEBACK_REVERSED"):
+            user_id = await user_dao.get_user_id_for_payzone_transaction(merchantPaymentId, tenant_id)
+            current_wallet_balance = await user_dao.get_wallet_balance(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                business_mobile_app=True if tenant_id != 'enterprise' else False
+            )
+            new_wallet_balance = float(current_wallet_balance.get(
+                "wallet_balance"))+float(amount)
+            await user_dao.update_wallet_balance(
+                new_balance=new_wallet_balance,
+                user_id=user_id, tenant_id=tenant_id,
+                business_mobile_app=True if tenant_id != 'enterprise' else False
+            )
+
+        if (status == "CHARGED_BACK"):
+            user_id = await user_dao.get_user_id_for_payzone_transaction(merchantPaymentId, tenant_id)
+            current_wallet_balance = await user_dao.get_wallet_balance(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                business_mobile_app=True if tenant_id != 'enterprise' else False
+            )
+            new_wallet_balance = float(current_wallet_balance.get(
+                "wallet_balance"))-float(amount)
+            await user_dao.update_wallet_balance(
+                new_balance=new_wallet_balance,
+                user_id=user_id, tenant_id=tenant_id,
+                business_mobile_app=True if tenant_id != 'enterprise' else False
+            )
+
+        return web.Response(status=200, body=json.dumps({"data": ""}), content_type="application/json")
+    except Exception as e:
+        LOGGER.error(e)
+        return web.Response(
+            status=500,
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
             content_type="application/json",
         )

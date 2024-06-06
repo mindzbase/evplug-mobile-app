@@ -5,11 +5,9 @@ import logging
 from aiohttp import web
 
 from dao import app_dao
-from errors.mysql_error import MissingObjectOnDB, ParameterMissing
+from errors.mysql_error import MissingObjectOnDB
 from service_layers.app_layer import get_tenant_ids_based_on_mobile_app
 from service_layers.app_layer import organise_recent_charging_station
-from sms import send_otp, verify_otp
-from utils import validate_parameters
 import utils
 
 LOGGER = logging.getLogger("server")
@@ -26,13 +24,12 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
         location_filter_ids = [
             int(x) for x in request.query.get("location_ids", "").split(",") if x
         ]
-        tenant_ids = await get_tenant_ids_based_on_mobile_app(
+        tenant_id_list = await get_tenant_ids_based_on_mobile_app(
             tenant_id=tenant_id,
             business_mobile_app=business_mobile_app,
         )
 
-        if tenant_ids:
-            tenant_id_list = tenant_ids.split(",")
+        if tenant_id_list:
             property_tasks = []
             location_tasks = []
             location_amenity_tasks = []
@@ -41,6 +38,7 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
             connector_tasks = []
             recent_location_tasks = []
             favorite_location_tasks = []
+            images_tasks = []
             for tenant in tenant_id_list:
                 property_tasks.append(
                     app_dao.business_details_and_properties(
@@ -89,6 +87,10 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
                         user_id=user_id
                     )
                 )
+                images_tasks.append(
+                    app_dao.get_location_images_by_tenant(tenant_id=tenant)
+                )
+
             tenant_property = await asyncio.gather(*property_tasks)
             locations = await asyncio.gather(*location_tasks)
             location_amenities = await asyncio.gather(*location_amenity_tasks)
@@ -97,6 +99,7 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
             connectors = await asyncio.gather(*connector_tasks)
             recent_locations = await asyncio.gather(*recent_location_tasks)
             favorite_locations = await asyncio.gather(*favorite_location_tasks)
+            images_locations = await asyncio.gather(*images_tasks)
             recent_locations_dict = await organise_recent_charging_station(
                 recent_locations
             )
@@ -107,6 +110,7 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
             amenities_dict = {}
             review_dict = {}
             fav_dict = {}
+            images_dict = {}
             final_location_list = []
             for i in location_reviews:
                 review_dict.update(i)
@@ -122,6 +126,8 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
                 location_dict.update(i)
             for i in favorite_locations:
                 fav_dict.update(i)
+            for i in images_locations:
+                images_dict.update(i)
 
             for tenant, locations in location_dict.items():
                 for location_id, location in locations.items():
@@ -172,12 +178,14 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
                         temp_chargers = []
                         for charger in chargers:
                             charger_id = charger.get('charger_id')
+                            charger["tenant_id"] = tenant
                             if (
                                 connector_dict.get(tenant)
                                 and connector_dict[tenant].get(location_id)
                             ):
                                 if (
-                                    connector_dict[tenant][location_id].get(charger_id)
+                                    connector_dict[tenant][location_id].get(
+                                        charger_id)
                                 ):
                                     charger['connectors'] = connector_dict[tenant][
                                         location_id][charger_id]
@@ -188,8 +196,12 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
                         location["chargers"] = charger_dict[tenant].get(
                             location_id, [])
 
-                    location["images"] = []
-                    location.get('chargers') and final_location_list.append(location)
+                    if images_dict.get(tenant):
+                        location["images"] = images_dict[tenant].get(
+                            location_id, [])
+
+                    location.get(
+                        'chargers') and final_location_list.append(location)
 
         return web.Response(
             status=200,
@@ -216,6 +228,11 @@ async def get_connector_type(request: web.Request) -> web.Response:
     try:
         request["user"]
         tenant_id = request["tenant_id"]
+        business_mobile_app = request["business_mobile_app"]
+        tenant_ids = await get_tenant_ids_based_on_mobile_app(
+            tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app,
+        )
         res = await app_dao.get_connector_list(tenant_id)
         return web.Response(
             status=200,
@@ -243,76 +260,6 @@ async def get_organisation_faq(request: web.Request) -> web.Response:
             body=json.dumps(res),
             content_type="application/json",
         )
-    except Exception as e:
-        LOGGER.error(e)
-        return web.Response(
-            status=500,
-            body=json.dumps(
-                {"msg": f"Internal Server error occured with error {e}"}),
-            content_type="application/json",
-        )
-
-
-@app_routes.post("/app/send_verification_otp/")
-async def send_verification_otp(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        phone = data.get("phone")
-        tenant_id = request["tenant_id"]
-        validate_parameters(phone)
-        response = send_otp(
-            destination_number=phone,
-            code_length=6,
-            validity_period=15,
-            language="en-US",
-        )
-        return web.Response(
-            status=200,
-            body=json.dumps(
-                {
-                    "msg": "successful",
-                    "status_code": response.get("status_code"),
-                    "reference_id": response.get("reference_id"),
-                },
-            ),
-            content_type="application/json",
-        )
-    except ParameterMissing as e:
-        LOGGER.error(e)
-        return e.jsonResponse
-    except Exception as e:
-        LOGGER.error(e)
-        return web.Response(
-            status=500,
-            body=json.dumps(
-                {"msg": f"Internal Server error occured with error {e}"}),
-            content_type="application/json",
-        )
-
-
-@app_routes.post("/app/verify_otp/")
-async def verify_send_otp(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        phone = data.get("phone")
-        otp = data.get("otp")
-        reference_id = data.get("reference_id")
-        validate_parameters(phone, otp, reference_id)
-        response = verify_otp(
-            destination_number=phone,
-            otp=otp,
-            brand_name="Sock8",
-            source="VerifyNumber",
-            referece_id=reference_id,
-        )
-        return web.Response(
-            status=200,
-            body=json.dumps({"msg": "successful", "verified": response}),
-            content_type="application/json",
-        )
-    except ParameterMissing as e:
-        LOGGER.error(e)
-        return e.jsonResponse
     except Exception as e:
         LOGGER.error(e)
         return web.Response(

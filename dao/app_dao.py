@@ -78,7 +78,8 @@ async def get_all_charging_stations(
                         },
                     )
                 elif row["public"] == 1 or (
-                    authorized_charger_list and (row["id"] in authorized_charger_list)
+                    authorized_charger_list and (
+                        row["id"] in authorized_charger_list)
                 ):
                     chargers_dict[row["id"]] = {
                         "charger_id": row["id"],
@@ -193,19 +194,21 @@ async def get_all_charging_locations(locations_ids: list, day: str):
     try:
         from utils import format_time_with_leading_zeros
         locations_list_str = (
-            (",").join([str(x) for x in locations_ids]) if locations_ids else "0"
+            (",").join([str(x)
+                        for x in locations_ids]) if locations_ids else "0"
         )
         query = f"""
             Select l.id, l.label as name, l.address_line_1 as address1, l.geo_coordinates,
             a.is_open, a.day, a.start_time as from_time, a.end_time as to_time
             FROM locations l INNER JOIN active_hours a on a.location_id = l.id
-            WHERE l.id IN ({locations_list_str}) and a.day = '{day}'
+            WHERE l.id IN ({locations_list_str}) and a.day = '{day}' and l.deleted_at is NULL
         """
         res = await helperdao.fetchall_dict(query)
         locations = {}
         if res is not None:
             for row in res:
-                row["from_time"] = format_time_with_leading_zeros(row["from_time"])
+                row["from_time"] = format_time_with_leading_zeros(
+                    row["from_time"])
                 row["to_time"] = format_time_with_leading_zeros(row["to_time"])
                 locations[row["id"]] = row
         return locations
@@ -216,7 +219,8 @@ async def get_all_charging_locations(locations_ids: list, day: str):
 async def get_all_third_party_charging_locations(locations_ids, day):
     try:
         locations_list_str = (
-            (",").join([str(x) for x in locations_ids]) if locations_ids else "0"
+            (",").join([str(x)
+                        for x in locations_ids]) if locations_ids else "0"
         )
         query = f"""
             Select
@@ -247,7 +251,8 @@ async def get_all_third_party_charging_locations(locations_ids, day):
 async def get_location_amenities(locations_ids: list):
     try:
         locations_list_str = (
-            (",").join([str(x) for x in locations_ids]) if locations_ids else "0"
+            (",").join([str(x)
+                        for x in locations_ids]) if locations_ids else "0"
         )
         query = f"""
             Select la.location_id, a.label, a.icon
@@ -271,7 +276,8 @@ async def get_location_amenities(locations_ids: list):
 async def get_location_images(locations_ids: list):
     try:
         locations_list_str = (
-            (",").join([str(x) for x in locations_ids]) if locations_ids else "0"
+            (",").join([str(x)
+                        for x in locations_ids]) if locations_ids else "0"
         )
         query = f"""
             Select location_id, image_url
@@ -351,7 +357,7 @@ async def get_user_price_for_chargers(user_id):
 
 async def get_all_child_businesses():
     query = """
-        SELECT * FROM `businesses` WHERE `have_mobile_app`='0';
+        SELECT * FROM `businesses` WHERE `have_mobile_app`='0' and tenant_id is not null;
     """
     res = await helperdao.fetchall_dict(query)
     return res
@@ -382,7 +388,6 @@ async def does_business_have_mobile_app(tenant_id):
     query = f"""
         select * from businesses where tenant_id='{tenant_id}';
     """
-    logging.info(f'business mobile query: {query}')
     res = await helperdao.fetchone_dict(query)
     res = res if res else {}
     return bool(res.get("have_mobile_app", False))
@@ -423,7 +428,20 @@ async def get_tenants_properties(tenant):
     )
 
 
+async def get_enterprise_properties():
+    query = """
+        SELECT
+            *
+        FROM
+            `enterprise_properties`;
+    """
+    res = await helperdao.fetchall_dict(query)
+    return res if res else {}
+
+
 async def get_location_of_tenant(tenant, day, location_ids=""):
+    from utils import format_time_with_leading_zeros
+
     location_ids = (
         "', '".join([str(location) for location in location_ids])
         if location_ids
@@ -443,9 +461,11 @@ async def get_location_of_tenant(tenant, day, location_ids=""):
             l.`is_all_time_available`
         FROM
             `tenant{tenant}`.`locations` l
+        WHERE
+            l.deleted_at is NULL
     """
     if location_ids:
-        query += f"WHERE l.id IN '{location_ids}'"
+        query += f"AND l.id IN '{location_ids}'"
     res = await helperdao.fetchall_dict(query)
     for location in res:
         is_all_time_available = location.get("is_all_time_available", True)
@@ -463,10 +483,12 @@ async def get_location_of_tenant(tenant, day, location_ids=""):
             """
             if location_ids:
                 location_hours_query += f"AND l.id IN '{location_ids}'"
-            day_res = await helperdao.fetchall_dict(location_hours_query)
+            day_res = await helperdao.fetchone_dict(location_hours_query)
             location["is_open"] = day_res.get("is_open", False)
-            location["from_time"] = day_res.get("from_time", str(time(0, 0, 0)))
-            location["to_time"] = day_res.get("to_time", str(time(23, 59, 59)))
+            location["from_time"] = format_time_with_leading_zeros(
+                day_res.get("from_time", time(0, 0, 0)))
+            location["to_time"] = format_time_with_leading_zeros(
+                day_res.get("to_time", time(23, 59, 59)))
             location["day"] = day
         else:
             location["is_open"] = True
@@ -598,6 +620,7 @@ async def charger_connector_of_tenant(tenant, user_id):
             `tenant{tenant}`.`charging_plans` cp
         ON
             cc.charging_plan_id=cp.id
+        WHERE cc.deleted_at is NULL
     """
     res = await helperdao.fetchall_dict(query)
     private_plan = await get_user_private_charger_connectors(
@@ -612,7 +635,8 @@ async def charger_connector_of_tenant(tenant, user_id):
         if private_plan.get(charger_id) and private_plan[charger_id].get(connector_id):
             private_connector = private_plan[charger_id][connector_id]
             i['label'] = private_connector.get('label', i.get('label'))
-            i['plan_type'] = private_connector.get('plan_type', i.get('plan_type'))
+            i['plan_type'] = private_connector.get(
+                'plan_type', i.get('plan_type'))
             i['billing_type'] = private_connector.get(
                 'billing_type',
                 i.get('billing_type')
@@ -665,6 +689,8 @@ async def get_user_private_charger_connectors(tenant, user_id):
             c.charging_plan_id=cp.id
         WHERE
             ci.user_id='{user_id}'
+        AND
+            c.deleted_at is NULL
     """
     res = await helperdao.fetchall_dict(query)
     connectors = {}
@@ -779,7 +805,7 @@ async def set_role_of_new_user(user_id, business_mobile_app, tenant_id):
         if business_mobile_app
         else "`model_has_roles`"
     )
-    model = r"App\Models\User"
+    model = r"App\\Models\\User"
     query = f"""
         INSERT INTO {table}(
             `role_id`,
@@ -829,11 +855,27 @@ async def business_details_and_properties(tenant_id, by_tenant=False):
     return business_res if not by_tenant else {tenant_id: business_res}
 
 
+async def enterprise_settings_and_properties():
+    properties = {}
+    settings = {}
+
+    query = "SELECT * FROM `enterprise_properties`"
+    res = await helperdao.fetchall_dict(query)
+
+    for key, value in res:
+        properties[key] = value
+
+    query2 = "SELECT * FROM `enterprise_settings`"
+    settings = await helperdao.fetchone_dict(query2)
+
+    settings.update(properties)
+    return settings
+
+
 async def get_tenant_detail(tenant_id):
     query = f"""
         SELECT * FROM `businesses` WHERE `tenant_id`='{tenant_id}'
     """
-    logging.info(f'get tenant query: {query}')
     res = await helperdao.fetchone_dict(query)
     return res.get("tenant_id") if res else None
 
@@ -851,3 +893,39 @@ async def get_favorite_charging_stations(tenant, user_id):
     for location in res:
         location_ids.append(location.get("location_id"))
     return {tenant: location_ids}
+
+
+async def get_location_images_by_tenant(tenant_id):
+    from server import MEDIA
+    from urllib.parse import quote_plus
+
+    locations = {}
+    query = f"""
+        SELECT
+            *
+        FROM `tenant{tenant_id}`.media
+        WHERE
+            model_type LIKE '%Location';
+    """
+    res = await helperdao.fetchall_dict(query)
+
+    tenant = f"tenant_{tenant_id}"
+
+    for location in res:
+        url = f"""{MEDIA}/{tenant}/location/{location['id']}/{quote_plus(location["file_name"])}"""
+        if location["model_id"] not in locations.keys():
+
+            locations[location["model_id"]] = [url]
+        else:
+            locations[location["model_id"]].append(url)
+
+    return {tenant_id: locations}
+
+
+async def get_tenant_id_from_unique_code(unique_code):
+    query = f"""
+        SELECT tenant_id FROM charger_unique_codes
+        WHERE unique_code='{unique_code}'
+    """
+    res = await helperdao.fetchone_dict(query)
+    return res["tenant_id"] if res else ""

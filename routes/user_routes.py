@@ -1,35 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import hashlib
 import json
 import logging
 import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict
-
-# from utils import By_hour, By_unit, idle_charging_info
 import stripe
 from aiohttp import web
 
 import fcm
-import lambda_function
+import razorpay
 import mail
 import ocpp_server
+from service_layers.rfid_layer import get_rfid_of_user
 import utils
 from config import config
 from constants import sort_order
 from dao import app_dao, user_dao
-from enums.repeat_interval import RepeatInterval
 from enums.span import Span
 from errors.mysql_error import (
-    MissingInfoException,
     ParameterMissing,
     PaymentMethodInvalid,
     check_empty_info,
 )
-from service_layers.app_layer import get_holding_amount_of_organisation
+from service_layers.app_layer import get_tenant_ids_based_on_mobile_app
 from service_layers.idle_fee import get_idle_details
 from smart_queue import (
     get_queue_size,
@@ -39,8 +36,8 @@ from smart_queue import (
     queue_number,
     skip_queue,
 )
-from utils import By_hour, By_unit, validate_parameters
-from websocket import send_message_to_client
+from utils import validate_parameters
+
 
 LOGGER = logging.getLogger("server")
 user_routes = web.RouteTableDef()
@@ -129,8 +126,8 @@ async def get_wallet_balance(request: web.Request) -> web.Response:
             tenant_id,
             business_mobile_app
         )
-        user_details_dict["wallet_balance"] = float(
-            user_details_dict.get("wallet_balance"))
+        balance = float(user_details_dict.get("wallet_balance"))
+        user_details_dict["wallet_balance"] = f"{balance:.2f}"
         return web.Response(
             status=200,
             body=json.dumps(user_details_dict),
@@ -550,6 +547,7 @@ async def start_charging(request: web.Request) -> web.Response:
 @user_routes.post("/user/start_charging")
 async def start_charging_v2(request: web.Request) -> web.Response:
     try:
+        business_mobile_app = request['business_mobile_app']
         data: Dict[str, Any] = await request.json()
         user_id = request["user"]
         tenant_id = request["tenant_id"]
@@ -563,14 +561,11 @@ async def start_charging_v2(request: web.Request) -> web.Response:
                 ),
                 content_type="application/json",
             )
-        business_mobile_app = request["business_mobile_app"]
-        should_start_charging = True
-        id_tag = await user_dao.get_users_id_tag(user_id, tenant_id)
-        logging.info(f'Id Tag : {id_tag}')
+        # should_start_charging = True
+        id_tag = await user_dao.get_users_id_tag(user_id, tenant_id, business_mobile_app)
         charger_details = await user_dao.charger_detail(
             charger_id=charger_id,
             tenant_id=tenant_id,
-            business_mobile_app=business_mobile_app,
         )
         # if not (bool(charger_details.get("public", 1))):
         #     charger_group = await user_dao.check_and_get_if_user_authorize_on_charger(
@@ -592,7 +587,6 @@ async def start_charging_v2(request: web.Request) -> web.Response:
             connector_id=connector_id,
             tenant_id=tenant_id
         )
-        logging.info(f'is_session_started : {is_session_started}')
 
         if is_session_started:
             await fcm.send_notification(
@@ -642,7 +636,9 @@ async def stop_public_charging(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
         tenant_id = request["tenant_id"]
-        id_tag = await user_dao.get_users_id_tag(user_id, tenant_id)
+        business_mobile_app = request["business_mobile_app"]
+        id_tag = await user_dao.get_users_id_tag(
+            user_id, tenant_id, business_mobile_app)
         (is_stopped, msg) = await ocpp_server.remote_stop(session_id, id_tag, tenant_id)
         LOGGER.info(f"is_stopped: {is_stopped}")
         LOGGER.info(f"msg: {msg}")
@@ -1259,19 +1255,47 @@ async def get_running_sessions_v2(request: web.Request) -> web.Response:
     try:
         user_id = request["user"]
         tenant_id = request["tenant_id"]
-        sessions_list = await user_dao.get_current_running_sessions_in_organisations(
-            tenant_id=tenant_id,
-        )
-        session_ids = []
-        for session in sessions_list:
-            if session["user_id"] == int(user_id):
-                session_ids.append(session["id"])
-        session_ids_string = ",".join([str(x) for x in session_ids])
         business_mobile_app = request["business_mobile_app"]
-        if len(session_ids):
-            session_details = await user_dao.get_running_session_details_v2(
-                session_ids_string, tenant_id, business_mobile_app
-            )
+        tenant_id_list = await get_tenant_ids_based_on_mobile_app(
+            tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app,
+        )
+
+        tasks1 = []
+        session_ids = {}
+
+        for tenant_id in tenant_id_list:
+            tasks1.append(user_dao.get_current_running_sessions_in_organisations(
+                tenant_id=tenant_id,
+            ))
+            session_ids[tenant_id] = []
+        results = await asyncio.gather(*tasks1)
+
+        sessions_list = []
+        for result in results:
+            sessions_list += result
+
+        tenant_id_cards = await get_rfid_of_user(
+            business_mobile_app, user_id, tenant_id_list
+        )
+
+        for session in sessions_list:
+            if session["id_tag"] in tenant_id_cards[session["tenant_id"]]:
+                session_ids[session["tenant_id"]].append(session["id"])
+
+        tasks2 = []
+        for tenant, session_list in session_ids.items():
+            if len(session_list):
+                session_ids_string = ",".join([str(x) for x in session_list])
+                tasks2.append(user_dao.get_running_session_details_v2(
+                    session_ids_string, tenant, business_mobile_app
+                ))
+
+        session_details = []
+        if tasks2:
+            multiple_session_details = await asyncio.gather(*tasks2)
+            for session in multiple_session_details:
+                session_details += session
             return web.Response(
                 status=200,
                 body=json.dumps({"sessions": session_details}),
@@ -2110,16 +2134,55 @@ async def get_users_sessions(request: web.Request):
         user_id = request["user"]
         tenant_id = request["tenant_id"]
         business_mobile_app = request["business_mobile_app"]
-        sessions = await user_dao.get_users_sessions(
-            user_id=user_id,
+        tenant_list = await get_tenant_ids_based_on_mobile_app(
             tenant_id=tenant_id,
             business_mobile_app=business_mobile_app,
         )
+        tasks = []
+        combine_result = []
+        sessions = []
+
+        for tenant_id in tenant_list:
+            tasks.append(user_dao.get_users_sessions(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                business_mobile_app=business_mobile_app,
+            ))
+        results = await asyncio.gather(*tasks)
+
+        if results:
+            for result in results:
+                for sessions in result:
+                    combine_result += sessions
+
+        if combine_result:
+            sessions = await user_dao.sort_history_and_arrange_by_date(
+                combine_result, False
+            )
+
+        date_session_dict = {}
+        final_list = []
+
+        for session in sessions:
+            start_time: datetime = session.get("start_time")
+            key = start_time.date()
+            session["start_date"] = str(key)
+            session["start_time"] = str(session["start_time"])
+
+            if key in date_session_dict.keys():
+                date_session_dict[key].append(session)
+            else:
+                date_session_dict[key] = [session]
+
+        for session_list in date_session_dict.values():
+            final_list.append(session_list)
+
         return web.Response(
             status=200,
-            body=json.dumps({"sessions": sessions}),
+            body=json.dumps({"sessions": final_list}),
             content_type="application/json",
         )
+
     except Exception as e:
         LOGGER.error(e)
         return web.Response(
@@ -2187,34 +2250,56 @@ async def get_wallet_history(request: web.Request):
         tenant_id = request["tenant_id"]
         test = request.headers.get("test")
         payment_method = request.headers.get("payment_method")
-        organisation_properties = await app_dao.get_tenants_properties(tenant_id)
         business_mobile_app = request["business_mobile_app"]
-        wallet_history = []
-        if payment_method == "maib":
-            wallet_history = await user_dao.get_maib_wallet_history(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                business_mobile_app=business_mobile_app,
-            )
-        elif (
-            organisation_properties.get("phonepe_gateway") == "True"
-            and test is not None
-        ):
-            wallet_history = await user_dao.get_phonepe_wallet_history(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                business_mobile_app=business_mobile_app,
-            )
+
+        tenant_id_list = await get_tenant_ids_based_on_mobile_app(
+            tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app,
+        )
+
+        organisation_properties = {}
+        if business_mobile_app:
+            organisation_properties = await app_dao.get_tenants_properties(tenant_id)
         else:
-            wallet_history = await user_dao.get_wallet_history(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                business_mobile_app=business_mobile_app,
+            organisation_properties = await app_dao.get_enterprise_properties()
+
+        combined_history = []
+        tasks = []
+        for tenant_id in tenant_id_list:
+            if payment_method == "maib":
+                tasks.append(user_dao.get_maib_wallet_history(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    business_mobile_app=business_mobile_app,
+                ))
+            elif (
+                organisation_properties.get("phonepe_gateway") == "True"
+                and test is not None
+            ):
+                tasks.append(user_dao.get_phonepe_wallet_history(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    business_mobile_app=business_mobile_app,
+                ))
+            else:
+                tasks.append(user_dao.get_wallet_history(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    business_mobile_app=business_mobile_app,
+                ))
+
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            for result in results:
+                combined_history += result
+
+        if combined_history:
+            combined_history = await user_dao.sort_history_and_arrange_by_date(
+                combined_history
             )
-        if wallet_history:
             return web.Response(
                 status=200,
-                body=json.dumps({"transactions": wallet_history}),
+                body=json.dumps({"transactions": combined_history}),
                 content_type="application/json",
             )
         else:
@@ -2275,11 +2360,36 @@ async def fetch_charging_station_details(request: web.Request) -> web.Response:
     try:
         user_id = request["user"]
         tenant_id = request["tenant_id"]
+        business_mobile_app = request["business_mobile_app"]
+
         day = "monday" if request.query.get(
             "day") is None else request.query.get("day")
         charger_id = request.query.get("charger_id")
         connector_id = request.query.get("connector_id")
-        validate_parameters(tenant_id, charger_id, connector_id)
+
+        validate_parameters(charger_id, connector_id)
+
+        if not business_mobile_app:
+            tenant_unique_code = request.query.get("tenant_unique_code")
+            tenant_id = await app_dao.get_tenant_id_from_unique_code(tenant_unique_code)
+
+        if not tenant_id:
+            return web.Response(
+                status=400,
+                body=json.dumps(
+                    {"msg": "Charging Station Not Found."}),
+                content_type="application/json",
+            )
+
+        tenant = await app_dao.get_tenant_detail(tenant_id=tenant_id)
+        if not tenant:
+            return web.Response(
+                status=400,
+                body=json.dumps(
+                    {"msg": "Charging Station Not Found."}),
+                content_type="application/json",
+            )
+
         charger = await user_dao.get_charger_detail(
             charger_id=charger_id, connector_id=connector_id, tenant_id=tenant_id
         )
@@ -2314,15 +2424,23 @@ async def fetch_charging_station_details(request: web.Request) -> web.Response:
         #     )
 
         if organisation_properties:
-            charger["connector"]["currency"] = utils.get_currency_symbol(organisation_properties.get(
-                "currency"))
-        charger["connector"]["price_include_tax"] = bool(
-            int(organisation_properties.get("price_include_tax", 0))
-        )
+            charger["connector"]["currency"] = utils.get_currency_symbol(
+                organisation_properties.get("currency")
+            )
+
+        if not business_mobile_app:
+            properties = await app_dao.get_enterprise_properties()
+            charger["connector"]["price_include_tax"] = bool(
+                int(properties.get("price_include_tax", 1))
+            )
+        else:
+            charger["connector"]["price_include_tax"] = bool(
+                int(organisation_properties.get("price_include_tax", 1))
+            )
 
         if user_plan:
             connector = charger.get("connector")
-            connector["price"] = str(user_plan.get(
+            connector["price"] = float(user_plan.get(
                 "price", connector.get("price")))
             connector["bill_by"] = user_plan.get(
                 "billing_type", connector.get("bill_by")
@@ -2330,11 +2448,19 @@ async def fetch_charging_station_details(request: web.Request) -> web.Response:
             connector["plan_type"] = user_plan.get(
                 "plan_type", connector.get("plan_type")
             )
+            connector["apply_after"] = (user_plan.get(
+                "apply_after", connector.get("apply_after")))
+            connector["fixed_starting_fee"] = float(user_plan.get(
+                "fixed_starting_fee", connector.get("fixed_starting_fee")))
+            connector["idle_charging_fee"] = float(user_plan.get(
+                "idle_charging_fee", connector.get("idle_charging_fee")))
+
             charger["connector"] = connector
 
         location["charger"] = charger
         location["amenities"] = amenities
         # location["images"] = images
+        location["tenant_id"] = tenant_id
 
         return web.Response(
             status=200,
@@ -3072,7 +3198,7 @@ async def get_idle_info(request: web.Request) -> web.Response:
         print(data)
         return web.Response(
             status=200,
-            body=json.dumps(data),
+            body=json.dumps(data[tenant_id][session_id]),
         )
     except ParameterMissing as e:
         return e.jsonResponse
@@ -3091,20 +3217,51 @@ async def get_ongoing_idle_sessions(request: web.Request) -> web.Response:
     try:
         user_id = request["user"]
         tenant_id = request["tenant_id"]
-        sessions = await user_dao.get_ongoing_idle_sessions(user_id, tenant_id)
+        business_mobile_app = request["business_mobile_app"]
+
+        tenant_id_list = await get_tenant_ids_based_on_mobile_app(
+            tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app,
+        )
+
+        tasks1 = []
+        tasks2 = []
+        sessions = {}
         sessions_dict = {}
-        for session_id in sessions:
-            sessions_dict[session_id] = await get_idle_details(
-                session_id=session_id,
-                user_id=user_id,
-                tenant_id=tenant_id,
+
+        for tenant_id in tenant_id_list:
+            tasks1.append(
+                user_dao.get_ongoing_idle_sessions(user_id, tenant_id)
             )
+            sessions_dict[tenant_id] = {}
+
+        results_sessions = await asyncio.gather(*tasks1)
+
+        for result in results_sessions:
+            sessions.update(result)
+
+        for tenant_id, sessions in sessions.items():
+            for session in sessions:
+                tasks2.append(get_idle_details(
+                    session_id=session,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                ))
+
+        results = await asyncio.gather(*tasks2)
+
+        for result in results:
+            for tenant_id, sessions in result.items():
+                sessions_dict[tenant_id].update(sessions)
+
         return web.Response(
             status=200,
             body=json.dumps(sessions_dict),
         )
+
     except ParameterMissing as e:
         return e.jsonResponse
+
     except Exception as e:
         LOGGER.error(e)
         return web.Response(
@@ -3149,17 +3306,26 @@ async def test_notification(request: web.Request) -> web.Response:
 @user_routes.get("/user/minimum_balance/")
 async def minimum_balance(request: web.Request) -> web.Response:
     try:
-        # request["user"]
         tenant_id = request["tenant_id"]
-        properties = await app_dao.business_details_and_properties(tenant_id=tenant_id)
+        business_mobile_app = request["business_mobile_app"]
+        properties = {}
+
+        if business_mobile_app:
+            properties = await app_dao.business_details_and_properties(
+                tenant_id=tenant_id)
+        else:
+            properties = await app_dao.enterprise_settings_and_properties()
+
         return web.Response(
             status=200,
             body=json.dumps({
-                "minimumWalletBalance": properties.get("minimum_wallet_balance")
+                "minimumWalletBalance": str(properties.get("minimum_wallet_balance", 0))
             }),
         )
+
     except ParameterMissing as e:
         return e.jsonResponse
+
     except Exception as e:
         LOGGER.error(e)
         return web.Response(
@@ -3235,6 +3401,214 @@ async def plugsharelink(request: web.Request) -> web.Response:
             status=400,
             body=json.dumps(
                 {"msg": f"No link found for charger id {charger_id}"}),
+        )
+    except Exception as e:
+        LOGGER.error(e)
+        return web.Response(
+            status=500,
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
+            content_type="application/json",
+        )
+
+
+@user_routes.post("/user/pay/")
+async def pay(request: web.Request):
+
+    try:
+        body = await request.json()
+        user_id = request["user"]
+        tenant_id = request["tenant_id"] if (
+            request["tenant_id"] != "") else "enterprise"
+        amount = body.get("amount")
+        currency = body.get("currency")
+        if (amount is None):
+            return web.Response(
+                status=400,
+                body=json.dumps(
+                    {"msg": f"Invalid parameters passed!. Please send correct parameters"})
+            )
+
+        merchant_name = config["MERCHANT_NAME"]
+        paywall_secret_key = config["PAYWALL_SECRET_KEY"]
+        transaction_id = uuid.uuid4()
+        payment_time = time.time()
+        charge_properties = {
+            "tenant_id": tenant_id if (tenant_id != "") else "enterprise"
+        }
+
+        payload = {
+            "merchantAccount": merchant_name,
+            "timestamp": int(payment_time),
+            "skin": "vps-1-vue",
+            "customerId": user_id,
+            "customerCountry": "MA",
+            "customerLocale": "en_US",
+            "price": body.get("amount"),
+            "currency": "MAD",
+            "description": "Wallet top-up for EVPlug",
+            "chargeId": str(transaction_id),
+            "mode": "DEEP_LINK",
+            "paymentMethod": "CREDIT_CARD",
+            "chargeProperties": charge_properties,
+            "callbackUrl": str("https://app-server.bornerecharge.ma/server/payzone/callback/"),
+            'flowCompletionUrl': str("https://app-server.bornerecharge.ma/server/payzone/flowback/")
+        }
+
+        json_payload_str = json.dumps(
+            payload, separators=(',', ':'), sort_keys=False)
+        signature = hashlib.sha256(
+            (paywall_secret_key + json_payload_str).encode('utf-8')).hexdigest()
+
+        response_dict = {
+            "json_payload": payload,
+            "signature": signature
+        }
+
+        await user_dao.insert_payment_transaction(
+            merchantPaymentId=transaction_id,
+            currency=currency,
+            amount=amount,
+            transactionTime=datetime.utcnow().isoformat(),
+            user_id=user_id,
+            tenant_id=tenant_id,
+            paymentGateway='payzone',
+            status='INITIATED'
+        )
+
+        return web.Response(
+            status=200,
+            body=json.dumps(response_dict, separators=(
+                ',', ':'), sort_keys=False),
+            content_type="application/json",
+        )
+    except Exception as e:
+        return web.Response(
+            status=500,
+            body=json.dumps(
+                {"msg": f"Internal server error occured with error {e}"})
+        )
+
+
+@user_routes.post("/user/order/")
+async def razopaycreateorder(request: web.Request):
+    try:
+        user_id = request["user"]
+        tenant_id = request["tenant_id"]
+        data = await request.json()
+
+        amount = data.get("amount", None)
+        currency = data.get("currency", None)
+        is_prod = data.get("is_prod", False)
+        razorpay_keys = {}
+        organisation_properties = await user_dao.business_details_and_properties(
+            tenant_id=tenant_id
+        )
+        if (is_prod):
+            razorpay_keys = organisation_properties.get("razorpay_prod_keys")
+        else:
+            razorpay_keys = organisation_properties.get("razorpay_test_keys")
+
+        if (amount is None) or (currency is None):
+            return web.Response(
+                status=400,
+                body=json.dumps({"msg": "Invalid Parameters"}),
+                content_type="application/json",
+            )
+
+        # Note: stripe key is set in one of the
+        # previous api keys because it is a global object
+        order_id, msg = await razorpay.create_order(
+            amount=amount,
+            currency=currency,
+            razorpay_keys=json.loads(razorpay_keys)
+        )
+
+        await user_dao.insert_payment_transaction(
+            merchantPaymentId=order_id,
+            currency=currency,
+            amount=amount,
+            transactionTime=datetime.utcnow().isoformat(),
+            user_id=user_id,
+            tenant_id=tenant_id,
+            paymentGateway='Razorpay',
+            status='PAYMENT_INITIATED'
+        )
+        return web.Response(
+            status=200,
+            body=json.dumps(
+                {"msg": msg, "order_id": order_id}),
+            content_type="application/json",
+        )
+
+    except Exception as e:
+        LOGGER.error(e)
+        return web.Response(
+            status=500,
+            body=json.dumps(
+                {"msg": f"Internal Server error occured with error {e}"}),
+            content_type="application/json",
+        )
+
+
+@user_routes.post("/user/razorpaycallbackv2/")
+async def razorpaycallback(request: web.Request):
+    try:
+        body = await request.json()
+        tenant_id = request["tenant_id"]
+        user_id = request["user"]
+        status = body.get("code")
+        amount_added = body.get("amount_added")
+        data = body.get("data")
+        is_prod = body.get("is_prod", False)
+        LOGGER.info(f"razorpay callback data {data}")
+        razorpay_order_id = data.get("razorpay_order_id", "N/A")
+        razorpay_payment_id = data.get("razorpay_payment_id", "N/A")
+        razorpay_signature = data.get("razorpay_signature", "N/A")
+
+        success = False
+        message = "Transaction Failed"
+        state = "FAILED"
+        razorpay_keys = {}
+        organisation_properties = await user_dao.business_details_and_properties(tenant_id)
+        if (is_prod):
+            razorpay_keys = organisation_properties.get("razorpay_prod_keys")
+        else:
+            razorpay_keys = organisation_properties.get("razorpay_test_keys")
+
+        signature = utils.generate_signature(
+            order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            secret=json.loads(razorpay_keys).get("API_SECRET")
+        )
+
+        if status == "PAYMENT_SUCCESS" and signature == razorpay_signature:
+
+            user_details_dict = await user_dao.get_wallet_balance(user_id)
+            current_balance = user_details_dict["wallet_balance"]
+            new_balance = float(int(amount_added) / 100) + float(
+                current_balance
+            )
+            await user_dao.update_wallet_balance(
+                new_balance=new_balance,
+                user_id=user_id,
+            )
+            success = True
+            message = "Transaction Success"
+            state = "COMPLETED"
+
+        await user_dao.update_payment_transaction(
+            status=state,
+            merchantPaymentId=razorpay_order_id,
+            paymentGatewayPaymentId=razorpay_payment_id,
+            paymentType="NA",
+            paymentMethod="NA",
+            data=json.dumps(data),
+            tenant_id=tenant_id
+        )
+        return web.Response(
+            status=200,
+            content_type="application/json",
         )
     except Exception as e:
         LOGGER.error(e)

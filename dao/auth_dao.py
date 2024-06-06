@@ -14,6 +14,7 @@ async def create_new_user(
     os: str,
     token: str,
     phone: str,
+    fid: str,
     address: str,
     business_mobile_app: bool,
     tenant_id: str
@@ -30,6 +31,16 @@ async def create_new_user(
             if business_mobile_app
             else "`customer_invites`"
         )
+        role_table = (
+            f"`tenant{tenant_id}`.`model_has_roles`"
+            if business_mobile_app
+            else "`model_has_roles`"
+        )
+        rfid_table = (
+            f"`tenant{tenant_id}`.`rfid_cards`"
+            if business_mobile_app
+            else "`rfid_cards`"
+        )
         user_query = f"""
             INSERT INTO {user_table} (
                 name,
@@ -44,7 +55,7 @@ async def create_new_user(
             VALUES (
                 '{name}',
                 '{email}',
-                '{datetime.datetime.utcnow()}',
+                null,
                 'password',
                 '{phone}',
                 '{0}',
@@ -56,14 +67,20 @@ async def create_new_user(
 
         customer_query = f"""
             INSERT INTO {customer_table}(email, user_id, name, wallet_balance,
-            os, token, is_invited, phone, address) values ('{email}',
+            os, token, is_invited, phone, address, firebase_uid) values ('{email}',
             '{user_id}', '{name}', {0}, '{os}', '{token}', {0},
-            '{phone}', '{address}')
+            '{phone}', '{address}', '{fid}')
         """
         await helperdao.upsert_delete(customer_query)
 
+        role_query = f"""
+            INSERT INTO {role_table}(role_id, model_type, model_id)
+            VALUES ('4', 'App\\Models\\User', '{user_id}');
+        """
+        await helperdao.upsert_delete(role_query)
+
         rfid_query = f"""
-            INSERT into `tenant{tenant_id}`.`rfid_cards` (
+            INSERT into {rfid_table}(
                 rfid_number,
                 user_id,
                 is_blocked,

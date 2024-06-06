@@ -18,10 +18,13 @@ async def remote_start(charger_id: str, id_tag: str, connector_id: int, tenant_i
                 json={
                     "charger_id": charger_id,
                     "id_tag": id_tag,
-                    "connector_id": connector_id,
-                    "tenant_id": tenant_id,
+                    "connector_id": connector_id
                 },
                 ssl=False,
+                headers={
+                    "tenant_id": tenant_id,
+                    "Content-type": "json/application"
+                }
             )
             data = await response.json()
             if response.status == 200:
@@ -37,16 +40,20 @@ async def remote_stop(session_id: int, stop_id_tag: str, tenant_id: str):
         try:
             LOGGER.info(session_id)
             LOGGER.info(stop_id_tag)
+            LOGGER.info(tenant_id)
             response = await req.post(
                 url=url + "chargers/remote_stop",
                 json={
                     "transaction_id": session_id,
-                    "stop_id_tag": stop_id_tag,
-                    "tenant_id": tenant_id
+                    "stop_id_tag": stop_id_tag
                 },
                 ssl=False,
+                headers={
+                    "tenant_id": tenant_id,
+                    "Content-type": "json/application"
+                }
             )
-            data = await response.json(content_type="application/json")
+            data = await response.json()
             LOGGER.info(response.status)
             LOGGER.info(data)
             if response.status == 200:
@@ -73,7 +80,11 @@ async def remote_stop(session_id: int, stop_id_tag: str, tenant_id: str):
 
 
 async def reserve_now(
-    user_id: str, charger_id: str, connector_id: str, expiry_date: datetime
+    user_id: str,
+    charger_id: str,
+    connector_id: str,
+    tenant_id: str,
+    expiry_date: datetime
 ):
     async with aiohttp.ClientSession() as req:
         try:
@@ -87,6 +98,10 @@ async def reserve_now(
                     "charger_id": charger_id,
                 },
                 ssl=False,
+                headers={
+                    "tenant_id": tenant_id,
+                    "Content-type": "json/application"
+                }
             )
             data = await response.json(content_type="application/json")
             LOGGER.info(response.status)

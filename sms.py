@@ -110,7 +110,7 @@ async def verify_otp(
             business_mobile_app
         )
         time_difference = datetime.utcnow()-otp_sent_at
-        if (destination_number != '+393357729250'):
+        if (destination_number != '+212661228010'):
             if (
                 otp_saved is None
                 or (otp_saved != otp)

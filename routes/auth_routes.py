@@ -81,6 +81,7 @@ async def add_user_details(request: web.Request) -> web.Response:
             or data.get("token") is None
             or data.get("phone") is None
             or data.get("address") is None
+            or data.get("fid") is None
         ):
             return web.Response(
                 status=400,
@@ -93,12 +94,14 @@ async def add_user_details(request: web.Request) -> web.Response:
         token = data["token"]
         phone = data["phone"]
         address = data["address"]
+        fid = data["fid"]
         user_id = await auth_dao.create_new_user(
             name=name,
             email=email,
             os=os,
             token=token,
             phone=phone,
+            fid=fid,
             address=address,
             tenant_id=request["tenant_id"],
             business_mobile_app=request["business_mobile_app"]
@@ -135,21 +138,18 @@ async def add_user_details(request: web.Request) -> web.Response:
 async def get_user_details_from_fid(request: web.Request) -> web.Response:
     try:
         fid = request.query["fid"]
+        tenant_id = request["tenant_id"]
+        business_mobile_app = request["business_mobile_app"]
         if fid is None:
             return web.Response(
                 status=400,
                 body=json.dumps({"msg": "Invalid Parameters"}),
                 content_type="application/json",
             )
-        user_id = await user_dao.get_user_id_from_fid(fid=fid)
-        if user_id is None:
-            return web.Response(
-                status=400,
-                body=json.dumps({"msg": "Invalid Parameters"}),
-                content_type="application/json",
-            )
         user_details_dict = await user_dao.get_user_details_with_user_id(
-            user_id=user_id,
+            fid=fid,
+            tenant_id=tenant_id,
+            business_mobile_app=business_mobile_app,
         )
 
         if user_details_dict is None:
@@ -222,6 +222,7 @@ async def user_verification(request: web.Request) -> web.Response:
                     tenant_id=request['tenant_id'],
                     event_name="email_verification",
                     data={"isEmailVerified": True},
+                    business_mobile_app=request["business_mobile_app"]
                 ),
             )
             organisation = tasks[0]
