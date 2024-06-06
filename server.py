@@ -9,7 +9,7 @@ from middleware import tenant_and_user_middleware
 from routes import auth_routes, user_routes, session_routes
 from routes import app_routes, vehicle_routes, ocpp_routes
 from webapp_routes import webapp_routes
-
+from config import config
 # WORKING_DIR = Path(__file__).resolve().parent
 # LOGFILE_LOCATION = os.path.join(WORKING_DIR, 'logs/server.log')
 
@@ -22,6 +22,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     force=True,
 )
+
+MEDIA = config["MEDIA_URL"]
 
 
 async def main():
@@ -50,17 +52,16 @@ async def main():
     )
     for route in list(app.router.routes()):
         cors.add(route)
-    from config import config
 
-    server = await websockets.serve(server_func, "0.0.0.0", config["WEBSOCKET_PORT"])
+    websocket_server = await websockets.serve(server_func, "0.0.0.0", config["WEBSOCKET_PORT"])
     runner = web.AppRunner(app)
     await runner.setup()
     # await check_and_create_table()
     site = web.TCPSite(runner, "0.0.0.0", config["WEBSERVER_PORT"])
     # await asyncio.wait([server.wait_closed(), site.start(), init_consumer()])
-    # await asyncio.wait([server.wait_closed(), site.start()])
-    logging.info('reaching to server.py in info file')
-    await asyncio.wait([asyncio.create_task(server.wait_closed()), asyncio.create_task(site.start())])
+    site_task = asyncio.create_task(site.start())
+    websocket_task = asyncio.create_task(websocket_server.wait_closed())
+    await asyncio.gather(site_task, websocket_task)
 
 try:
     asyncio.run(main())
