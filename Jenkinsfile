@@ -20,7 +20,7 @@ pipeline {
                 }
             }
         }
-        /*stage('Pushing Docker Image to Private Docker Registry') {
+        stage('Pushing Docker Image to Private Docker Registry') {
             steps {
                 // Define the remote server's IP address and SSH credentials
                 script {
@@ -31,7 +31,7 @@ pipeline {
                     // Additional steps can be added here, such as verification or testing
                 }
             }
-        }*/
+        }
 
         stage('Cleaning all Stopped Docker Containers') {
             steps {
