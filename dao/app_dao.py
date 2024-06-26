@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import time
+from datetime import datetime, time
 
 import logging
 
@@ -436,11 +436,16 @@ async def get_enterprise_properties():
             `enterprise_properties`;
     """
     res = await helperdao.fetchall_dict(query)
-    return res if res else {}
+    properties = {}
+    for property in res:
+        key = property['property_key']
+        value = property['property_value']
+        properties[key] = value
+    return properties
 
 
 async def get_location_of_tenant(tenant, day, location_ids=""):
-    from utils import format_time_with_leading_zeros
+    from utils import format_time_object
 
     location_ids = (
         "', '".join([str(location) for location in location_ids])
@@ -479,21 +484,23 @@ async def get_location_of_tenant(tenant, day, location_ids=""):
                 FROM
                     `tenant{tenant}`.`locations_hours` lh
                 WHERE
-                    lh.day='{day}'
+                    lh.day='{day}' and lh.location_id='{location.get('id')}'
             """
-            if location_ids:
-                location_hours_query += f"AND l.id IN '{location_ids}'"
             day_res = await helperdao.fetchone_dict(location_hours_query)
             location["is_open"] = day_res.get("is_open", False)
-            location["from_time"] = format_time_with_leading_zeros(
-                day_res.get("from_time", time(0, 0, 0)))
-            location["to_time"] = format_time_with_leading_zeros(
-                day_res.get("to_time", time(23, 59, 59)))
+            from_time = datetime.strptime(str(day_res.get("from_time")), "%H:%M:%S").time(
+            ) if day_res.get("from_time") else datetime.strptime("00:00:00", "%H:%M:%S").time()
+            to_time = datetime.strptime(str(day_res.get("to_time")), "%H:%M:%S").time(
+            ) if day_res.get("to_time") else datetime.strptime("23:59:59", "%H:%M:%S").time()
+            location["from_time"] = format_time_object(from_time)
+            location["to_time"] = format_time_object(to_time)
             location["day"] = day
         else:
             location["is_open"] = True
-            location["from_time"] = str(time(0, 0, 0))
-            location["to_time"] = str(time(23, 59, 59))
+            location["from_time"] = format_time_object(datetime.strptime(
+                "00:00:00", "%H:%M:%S").time())
+            location["to_time"] = format_time_object(datetime.strptime(
+                "23:59:59", "%H:%M:%S").time())
             location["day"] = day
 
     return {tenant: {i.get("id"): i for i in res}}
@@ -593,7 +600,7 @@ async def get_location_chargers_of_tenant(tenant, location_ids=""):
     return {tenant: chargers}
 
 
-async def charger_connector_of_tenant(tenant, user_id):
+async def charger_connector_of_tenant(tenant, user_id, business_mobile_app):
     query = f"""
         SELECT
             c.location_id,
@@ -603,6 +610,7 @@ async def charger_connector_of_tenant(tenant, user_id):
             cc.type,
             cc.status,
             cc.availability,
+            cc.note,
             cp.label,
             cp.type as plan_type,
             cp.billing_type,
@@ -624,7 +632,7 @@ async def charger_connector_of_tenant(tenant, user_id):
     """
     res = await helperdao.fetchall_dict(query)
     private_plan = await get_user_private_charger_connectors(
-        tenant=tenant, user_id=user_id
+        tenant=tenant, user_id=user_id, business_mobile_app=business_mobile_app
     )
     connectors = {}
     for i in res:
@@ -664,7 +672,12 @@ async def charger_connector_of_tenant(tenant, user_id):
     return {tenant: connectors}
 
 
-async def get_user_private_charger_connectors(tenant, user_id):
+async def get_user_private_charger_connectors(tenant, user_id, business_mobile_app):
+    table = (
+        f"`tenant{tenant}`.`customer_invites` ci"
+        if business_mobile_app
+        else "`customer_invites` ci"
+    )
     query = f"""
         SELECT
             cc.charger_id,
@@ -677,7 +690,7 @@ async def get_user_private_charger_connectors(tenant, user_id):
             cp.idle_charging_fee,
             cp.apply_after
         FROM
-            `tenant{tenant}`.`customer_invites` ci
+            {table}
         INNER JOIN
             `tenant{tenant}`.`customer_connectors` c
         ON ci.id=c.customer_invite_id

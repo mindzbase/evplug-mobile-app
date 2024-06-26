@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 import math
+import random
+import string
 import passlib.hash
 import stripe
 from errors.mysql_error import MissingObjectOnDB, ParameterMissing
@@ -297,6 +299,14 @@ def format_time_with_leading_zeros(td):
     return formatted_string
 
 
+def format_time_object(time_object):
+    hours = time_object.hour
+    minutes = time_object.minute
+    seconds = time_object.second
+    formatted_string = f"{hours:02}:{minutes:02}:{seconds:02}"
+    return formatted_string
+
+
 async def deduct_fund_by_payment_method(
     user_id, payment_method, final_amount, tenant_id, allow_nagative_balance=False
 ):
@@ -457,3 +467,10 @@ def generate_signature(secret_key, payload):
                          json_payload, hashlib.sha256).hexdigest()
 
     return signature
+
+
+def generate_unique_key(key):
+    suffix_length = 7
+    suffix = ''.join(random.choices(
+        string.ascii_letters + string.digits, k=suffix_length))
+    return key + suffix

@@ -73,7 +73,8 @@ async def get_all_charging_station_coordinates(request: web.Request) -> web.Resp
                 )
                 connector_tasks.append(
                     app_dao.charger_connector_of_tenant(
-                        tenant=tenant, user_id=user_id),
+                        tenant=tenant, user_id=user_id,
+                        business_mobile_app=business_mobile_app),
                 )
                 recent_location_tasks.append(
                     app_dao.get_recent_charging_stations(

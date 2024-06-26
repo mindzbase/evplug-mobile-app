@@ -1465,6 +1465,7 @@ async def get_running_session_details_v2(session_ids, tenant_id, business_mobile
         query = f"""
             SELECT
                 s.id,
+                s.start_time,
                 sp.vehicle_id,
                 l.address_line_1,
                 s.charger_id,
@@ -1529,6 +1530,7 @@ async def get_running_session_details_v2(session_ids, tenant_id, business_mobile
                         },
                         "duration": session["duration"],
                         "connectorType": session["connector_type"],
+                        "startTime": session["start_time"],
                         "tenantId": tenant_id
                     }
                 )
@@ -2624,6 +2626,7 @@ async def get_users_sessions(user_id, tenant_id, business_mobile_app):
                 + session.get("fixed_starting_fee", 0), 2
             )
             session["final_cost"] = session.get("final_amount", 0)
+            session["tenant_id"] = tenant_id
 
             if key in sessions.keys():
                 sessions[key].append(session)
@@ -2686,6 +2689,9 @@ async def get_wallet_history(user_id, tenant_id, business_mobile_app):
             `inv`.`fixed_starting_fee`,
             `inv`.`idle_charging_cost`,
             `inv`.`gateway_fee`,
+            `inv`.`total_cost_without_tax`,
+            `inv`.`total_tax`,
+            `inv`.`final_amount` as final_cost,
             `s`.`start_time`,
             `v`.`model`,
             `v`.`manufacturer`,
@@ -2705,34 +2711,6 @@ async def get_wallet_history(user_id, tenant_id, business_mobile_app):
             ;
     """
     sessions_result = await helperdao.fetchall_dict(query)
-    if sessions_result:
-        for session in sessions_result:
-            charging_cost_with_tax = (
-                session.get("charging_cost_with_tax")
-                if session.get("charging_cost_with_tax")
-                else 0
-            )
-            gateway_fee = (
-                session.get("gateway_fee")
-                if session.get("gateway_fee")
-                else 0
-            )
-            idle_charging_cost = (
-                session.get("idle_charging_cost")
-                if session.get("idle_charging_cost")
-                else 0
-            )
-            fixed_starting_fee = (
-                session.get("fixed_starting_fee")
-                if session.get("fixed_starting_fee")
-                else 0
-            )
-            session["final_cost"] = (
-                charging_cost_with_tax
-                + idle_charging_cost
-                + gateway_fee
-                + fixed_starting_fee
-            )
     table_history = (
         f"`tenant{tenant_id}`.`payment_transactions`"
         if business_mobile_app

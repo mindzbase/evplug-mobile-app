@@ -36,7 +36,7 @@ from smart_queue import (
     queue_number,
     skip_queue,
 )
-from utils import validate_parameters
+from utils import generate_unique_key, validate_parameters
 
 
 LOGGER = logging.getLogger("server")
@@ -581,7 +581,6 @@ async def start_charging_v2(request: web.Request) -> web.Response:
         #         ),
         #         content_type="application/json",
         #     )
-        LOGGER.info(f'charger_id: {charger_id}, id_tag: {id_tag}, connector_id: {connector_id}, tenant_id: {tenant_id}')
         is_session_started, msg = await ocpp_server.remote_start(
             charger_id=charger_id,
             id_tag=id_tag,
@@ -1297,9 +1296,19 @@ async def get_running_sessions_v2(request: web.Request) -> web.Response:
             multiple_session_details = await asyncio.gather(*tasks2)
             for session in multiple_session_details:
                 session_details += session
+
+            def get_datetime(item):
+                if "startTime" in item:
+                    start_time = item.pop("startTime")
+                    return start_time
+                else:
+                    return None
+
+            sorted_result = sorted(
+                session_details, key=lambda x: get_datetime(x), reverse=True)
             return web.Response(
                 status=200,
-                body=json.dumps({"sessions": session_details}),
+                body=json.dumps({"sessions": sorted_result}),
                 content_type="application/json",
             )
 
@@ -3432,7 +3441,9 @@ async def pay(request: web.Request):
 
         merchant_name = config["MERCHANT_NAME"]
         paywall_secret_key = config["PAYWALL_SECRET_KEY"]
-        transaction_id = uuid.uuid4()
+        payment_gateway = "payzone"
+        merchant_payment_id = generate_unique_key(key=payment_gateway)
+
         payment_time = time.time()
         charge_properties = {
             "tenant_id": tenant_id if (tenant_id != "") else "enterprise"
@@ -3448,7 +3459,7 @@ async def pay(request: web.Request):
             "price": body.get("amount"),
             "currency": "MAD",
             "description": "Wallet top-up for EVPlug",
-            "chargeId": str(transaction_id),
+            "chargeId": str(merchant_payment_id),
             "mode": "DEEP_LINK",
             "paymentMethod": "CREDIT_CARD",
             "chargeProperties": charge_properties,
@@ -3467,13 +3478,13 @@ async def pay(request: web.Request):
         }
 
         await user_dao.insert_payment_transaction(
-            merchantPaymentId=transaction_id,
+            merchantPaymentId=merchant_payment_id,
             currency=currency,
             amount=amount,
             transactionTime=datetime.utcnow().isoformat(),
             user_id=user_id,
             tenant_id=tenant_id,
-            paymentGateway='payzone',
+            paymentGateway=payment_gateway,
             status='INITIATED'
         )
 

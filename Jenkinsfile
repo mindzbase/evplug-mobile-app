@@ -50,7 +50,7 @@ pipeline {
                 }
         }
         
-        stage('Updating/Deploying new Evplug Mobile Server Container') {
+        /*stage('Updating/Deploying new Evplug Mobile Server Container') {
             steps {
                 
                 script {
@@ -86,7 +86,7 @@ pipeline {
                     // Additional steps can be added here, such as verification or testing
                 }
             }
-        }
+        }*/
     }
 
     post {
