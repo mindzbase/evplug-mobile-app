@@ -13,6 +13,7 @@ url = config["OCPP_SERVER_URL"]
 async def remote_start(charger_id: str, id_tag: str, connector_id: int, tenant_id: str):
     async with aiohttp.ClientSession() as req:
         try:
+            LOGGER.info(f'reaching in remote_start -> charger_id: {charger_id}, id_tag: {id_tag}, connector_id: {connector_id}, tenant_id: {tenant_id}')
             response = await req.post(
                 url=url + "chargers/remote_start",
                 json={
@@ -29,7 +30,9 @@ async def remote_start(charger_id: str, id_tag: str, connector_id: int, tenant_i
             data = await response.json()
             if response.status == 200:
                 if data["status"] == "Accepted":
+                    LOGGER.info(f'returning accepted')
                     return True, ""
+            LOGGER.info(f'returning refused')
             return False, "Charger refused to start charging!"
         except Exception as e:
             raise (e)
