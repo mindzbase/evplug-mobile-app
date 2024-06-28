@@ -581,13 +581,14 @@ async def start_charging_v2(request: web.Request) -> web.Response:
         #         ),
         #         content_type="application/json",
         #     )
+        LOGGER.info(f'id_tag : {id_tag}')
         is_session_started, msg = await ocpp_server.remote_start(
             charger_id=charger_id,
             id_tag=id_tag,
             connector_id=connector_id,
             tenant_id=tenant_id
         )
-
+        LOGGER.info(f'is session start=> charger_id: {charger_id}, id_tag: {id_tag}, connector_id: {connector_id}, tenant_id: {tenant_id}')
         if is_session_started:
             await fcm.send_notification(
                 title="Session Started",
